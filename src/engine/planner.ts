@@ -420,6 +420,12 @@ function replay(req: PlanRequest, follow: readonly FollowStep[]): Node | null {
   return n
 }
 
+/** The remaining steps of a plan, re-scored on the current state; null if no longer possible. */
+export function replayPlan(req: PlanRequest, follow: readonly FollowStep[]): Plan | null {
+  const n = replay(req, follow)
+  return n ? toPlan(n, true) : null
+}
+
 /**
  * Beam search. Calls `onProgress` after each depth with the best plans so far.
  * Returns the final top plans (distinct first moves).

@@ -12,7 +12,7 @@ import * as G from './game'
 import type { GameState, NewGameOptions } from './game'
 import type { Rules } from '../config/rules'
 
-export type SessionEvent = 'place' | 'hold' | 'undo' | 'redo' | 'restart' | 'over' | 'rules'
+export type SessionEvent = 'place' | 'hold' | 'revert' | 'undo' | 'redo' | 'restart' | 'over' | 'rules'
 
 export class Session {
   state: GameState
@@ -103,7 +103,7 @@ export class Session {
   /** Replace the current state without touching history (only for un-doing a hold within a turn). */
   revert(state: GameState) {
     this.state = state
-    this.emit('hold')
+    this.emit('revert')
   }
 
   /** Start from an arbitrary state (puzzles, tests); clears history. */

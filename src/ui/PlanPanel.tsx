@@ -132,6 +132,23 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
             </span>
           </div>
 
+          {pl.following && pl.plan ? (
+            <div className="following">
+              <span>
+                <strong>Following</strong> · {pl.plan.steps.length} step{pl.plan.steps.length === 1 ? '' : 's'} left
+              </span>
+              <button
+                onClick={(e) => {
+                  trainer.replan()
+                  e.currentTarget.blur()
+                }}
+              >
+                New plan
+              </button>
+            </div>
+          ) : pl.note ? (
+            <p className="muted small">{pl.note}</p>
+          ) : null}
           {pl.plans.length > 0 ? (
             <div className="plan-list">
               {pl.plans.map((p, i) => (
@@ -159,9 +176,9 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
             </ol>
           )}
           <p className="muted small">
-            Plans use your current piece, hold and the next {Math.min(5, st.depth)} previews. Numbers on the board are
-            placement order (H = hold first). Follow step 1 and the plan carries on; Tab / Shift+Tab switches plans.
-            Assumes unlimited time (ignores gravity and lock delay).
+            Plans use your current piece, hold and the previews. Numbers on the board are placement order (H = hold
+            first). Place step 1 and the plan locks: it stays until it pays off or you leave it. Tab / Shift+Tab
+            switches plans before you commit. Assumes unlimited time (ignores gravity and lock delay).
           </p>
         </>
       )}

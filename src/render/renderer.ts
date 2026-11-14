@@ -119,6 +119,9 @@ export class Renderer {
       }
     }
 
+    // plan / finder overlays sit under the ghost and the live piece
+    for (const o of overlays) o.draw(ctx, v)
+
     // ghost + active
     const g = ghost(s)
     if (s.active && g) {
@@ -135,8 +138,6 @@ export class Renderer {
     ctx.lineTo(v.left + WIDTH * cell + 1, v.top + ROWS * cell + 1)
     ctx.lineTo(v.left + WIDTH * cell + 1, v.top + BUFFER_SHOWN * cell)
     ctx.stroke()
-
-    for (const o of overlays) o.draw(ctx, v)
 
     // hold and next
     const sideW = SIDE * cell
@@ -209,12 +210,32 @@ export class Renderer {
     ctx.fillRect(x + 0.5, y + h - 0.5 - Math.max(2, h * 0.12), w - 1, Math.max(2, h * 0.12))
   }
 
+  /** Ghost: translucent fill plus a bright outline so it reads over the stack and overlays. */
   private pieceGhost(p: Piece, color: string) {
     const { ctx } = this
     const v = this.view
+    const cells = pieceCells(p).filter(([, y]) => y < ROWS)
+    const has = (x: number, y: number) => cells.some(([cx, cy]) => cx === x && cy === y)
     ctx.save()
     ctx.globalAlpha = THEME.ghostAlpha
-    for (const [x, y] of pieceCells(p)) if (y < ROWS) this.block(...v.rect(x, y), color)
+    ctx.fillStyle = color
+    for (const [x, y] of cells) {
+      const [px, py, w, h] = v.rect(x, y)
+      ctx.fillRect(px + 1, py + 1, w - 2, h - 2)
+    }
+    ctx.globalAlpha = 1
+    ctx.strokeStyle = color
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    for (const [x, y] of cells) {
+      const [px, py, w, h] = v.rect(x, y)
+      const l = px + 1, r = px + w - 1, t = py + 1, b = py + h - 1
+      if (!has(x, y + 1)) { ctx.moveTo(l, t); ctx.lineTo(r, t) }
+      if (!has(x, y - 1)) { ctx.moveTo(l, b); ctx.lineTo(r, b) }
+      if (!has(x - 1, y)) { ctx.moveTo(l, t); ctx.lineTo(l, b) }
+      if (!has(x + 1, y)) { ctx.moveTo(r, t); ctx.lineTo(r, b) }
+    }
+    ctx.stroke()
     ctx.restore()
   }
 }

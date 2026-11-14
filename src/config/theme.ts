@@ -19,6 +19,6 @@ export const THEME = {
   buffer: 'rgba(255,255,255,0.025)',
   garbage: '#6b6f7a',
   dead: '#3a3d47',
-  ghostAlpha: 0.28,
+  ghostAlpha: 0.38,
   label: '#8a90a0',
 }

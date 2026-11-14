@@ -91,17 +91,19 @@ export class Trainer {
       if (e === 'over') this.endedAt = performance.now()
       if (e === 'undo' || e === 'redo') this.endedAt = s.over ? this.endedAt : null
       this.finder.recompute(s)
-      if (e === 'place') {
-        this.planner.notePlacement(this.seen, s)
-        this.planner.request(s, this.settings.spinRule)
-      } else if (e === 'hold') {
-        this.planner.noteHold(s, this.settings.spinRule)
-      } else if (e !== 'over') {
-        this.planner.request(s, this.settings.spinRule)
-      }
+      const rule = this.settings.spinRule
+      if (e === 'place') this.planner.onPlace(this.seen, s, rule)
+      else if (e === 'hold') this.planner.onHold(s, rule)
+      else if (e === 'undo' || e === 'redo' || e === 'revert') this.planner.onRestore(s, rule)
+      else if (e !== 'over') this.planner.search(s, rule)
       this.seen = s
       this.bump()
     })
+  }
+
+  /** Drop the current (possibly locked) plan and search again. */
+  replan() {
+    this.planner.replan(this.session.state, this.settings.spinRule)
   }
 
   setPlanner(patch: Partial<PlannerSettings>) {
@@ -193,7 +195,7 @@ export class Trainer {
     const ro = new ResizeObserver(fit)
     ro.observe(container)
 
-    this.planner.request(this.session.state, this.settings.spinRule)
+    this.planner.search(this.session.state, this.settings.spinRule)
     const unbind = bindKeyboard(window, {
       press: (a, t, code) => this.press(a, t, code),
       cycle: (dir) => this.cycle(dir),

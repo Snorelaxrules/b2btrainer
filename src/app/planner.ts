@@ -1,11 +1,21 @@
 /**
- * Lookahead plans for the UI: talks to the planner worker, tracks the selected
- * plan, and notices when the player follows it so the plan stays stable.
+ * Lookahead plans for the UI.
+ *
+ * Two modes:
+ *  - searching: no plan committed yet; the worker searches after each placement
+ *    and the player can browse plans A/B/C.
+ *  - following: the player placed step 1 of the shown plan, so that plan is
+ *    LOCKED. Each further matching placement advances it; no new search runs
+ *    (so it can't be swapped out mid-setup). It ends when the plan completes,
+ *    the player deviates, the plan stops being possible, or they ask for a new one.
+ *
+ * Planner state is remembered per turn-start GameState, so undo/redo brings the
+ * plan back exactly as it was.
  */
 import type { SpinRule } from '../config/scoring'
 import type { GameState } from '../engine/game'
 import { pieceCells } from '../engine/game'
-import type { FollowStep, Plan, PlanRequest } from '../engine/planner'
+import { type Plan, type PlanRequest, replayPlan } from '../engine/planner'
 import type { WorkerIn, WorkerOut } from '../search/planner.worker'
 
 export interface PlannerSettings {
@@ -29,20 +39,27 @@ const cellsKey = (cells: readonly (readonly [number, number])[]) =>
     .sort((a, b) => a - b)
     .join(',')
 
+interface Snapshot {
+  plans: Plan[]
+  selected: number
+  following: boolean
+}
+
 export class PlannerController {
   settings: PlannerSettings
   plans: Plan[] = []
   selected = 0
+  /** locked onto plans[0] */
+  following = false
   running = false
   depthDone = 0
   ms = 0
-  nodes = 0
-  /** steps of the plan being followed (after the ones already placed) */
-  private follow: FollowStep[] | null = null
-  /** the followed plan, kept on top while the rest of the search streams in */
-  private pinned: Plan | null = null
+  /** why the last plan ended, shown briefly in the panel */
+  note = ''
   private worker: Worker | null = null
   private reqId = 0
+  private reqState: GameState | null = null
+  private cache = new WeakMap<GameState, Snapshot>()
   version = 0
   private listeners = new Set<() => void>()
 
@@ -66,53 +83,9 @@ export class PlannerController {
     return this.plans[this.selected] ?? null
   }
 
-  /** The player just locked a piece: did it match step 1 of the shown plan? */
-  notePlacement(before: GameState, after: GameState) {
-    const plan = this.plan
-    const placed = after.last?.piece
-    this.follow = null
-    if (!plan || !placed || after.stats.pieces !== before.stats.pieces + 1) return
-    const s1 = plan.steps[0]
-    if (!s1 || s1.type !== placed.type || cellsKey(s1.cells) !== cellsKey(pieceCells(placed))) return
-    const rest = plan.steps.slice(1)
-    if (rest.length) this.follow = rest.map((s) => ({ piece: s.piece, viaHold: s.viaHold }))
-  }
-
-  /** The player held: keep the plan if it asked for a hold, else replan. */
-  noteHold(s: GameState, spinRule: SpinRule) {
-    if (this.plan?.steps[0]?.viaHold) return // following: step 1 is now the piece in hand
-    this.follow = null
-    this.request(s, spinRule)
-  }
-
-  cycle(dir: 1 | -1) {
-    if (!this.plans.length) return
-    this.selected = (this.selected + dir + this.plans.length) % this.plans.length
-    this.bump()
-  }
-
-  select(i: number) {
-    if (i === this.selected || !this.plans[i]) return
-    this.selected = i
-    this.bump()
-  }
-
-  setSettings(patch: Partial<PlannerSettings>, s: GameState, spinRule: SpinRule) {
-    this.settings = { ...this.settings, ...patch }
-    if (patch.depth !== undefined || patch.beam !== undefined || patch.enabled) this.request(s, spinRule)
-    else this.bump()
-  }
-
-  /** Start a fresh search for this state (cancelling any search in flight). */
-  request(s: GameState, spinRule: SpinRule) {
-    if (!this.settings.enabled || !s.active || s.over) {
-      this.cancel()
-      this.plans = []
-      this.bump()
-      return
-    }
-    if (this.running) this.cancel()
-    const req: PlanRequest = {
+  private requestFor(s: GameState, spinRule: SpinRule): PlanRequest | null {
+    if (!s.active || s.over) return null
+    return {
       board: s.board,
       counters: s.counters,
       current: s.active.type,
@@ -122,17 +95,124 @@ export class PlannerController {
       depth: this.settings.depth,
       beam: this.settings.beam,
       spinRule,
-      follow: this.follow ?? undefined,
+    }
+  }
+
+  private remember(s: GameState) {
+    this.cache.set(s, { plans: this.plans, selected: this.selected, following: this.following })
+  }
+
+  /** A piece locked: advance a matching plan, otherwise search again. */
+  onPlace(before: GameState, after: GameState, spinRule: SpinRule) {
+    const plan = this.plan
+    const placed = after.last?.piece
+    const s1 = plan?.steps[0]
+    const matched =
+      !!s1 &&
+      !!placed &&
+      after.stats.pieces === before.stats.pieces + 1 &&
+      s1.type === placed.type &&
+      cellsKey(s1.cells) === cellsKey(pieceCells(placed))
+
+    if (matched && plan) {
+      const rest = plan.steps.slice(1)
+      if (!rest.length) {
+        this.note = plan.payoffs.length ? `Plan complete: ${plan.steps[plan.payoff]?.result.label ?? ''}` : 'Plan complete'
+        return this.search(after, spinRule)
+      }
+      const req = this.requestFor(after, spinRule)
+      const next = req ? replayPlan(req, rest.map((s) => ({ piece: s.piece, viaHold: s.viaHold }))) : null
+      if (next) {
+        this.cancel()
+        this.plans = [next]
+        this.selected = 0
+        this.following = true
+        this.note = ''
+        this.remember(after)
+        this.bump()
+        return
+      }
+      this.note = 'Plan no longer possible; replanned'
+      return this.search(after, spinRule)
+    }
+    this.note = this.following ? 'Left the plan; replanned' : ''
+    this.search(after, spinRule)
+  }
+
+  /** The player held: fine if the plan asked for it, otherwise replan. */
+  onHold(s: GameState, spinRule: SpinRule) {
+    if (this.plan?.steps[0]?.viaHold) {
+      this.bump()
+      return
+    }
+    this.note = this.following ? 'Left the plan; replanned' : ''
+    this.search(s, spinRule)
+  }
+
+  /** Undo / redo: restore the plan that belonged to that position, if any. */
+  onRestore(s: GameState, spinRule: SpinRule) {
+    const snap = this.cache.get(s)
+    if (snap) {
+      this.cancel()
+      this.plans = snap.plans
+      this.selected = snap.selected
+      this.following = snap.following
+      this.note = ''
+      this.bump()
+      return
+    }
+    this.search(s, spinRule)
+  }
+
+  /** Drop any locked plan and search from scratch. */
+  replan(s: GameState, spinRule: SpinRule) {
+    this.note = ''
+    this.search(s, spinRule)
+  }
+
+  cycle(dir: 1 | -1) {
+    if (this.following || this.plans.length < 2) return
+    this.selected = (this.selected + dir + this.plans.length) % this.plans.length
+    if (this.reqState && !this.running) this.remember(this.reqState)
+    this.bump()
+  }
+
+  select(i: number) {
+    if (this.following || i === this.selected || !this.plans[i]) return
+    this.selected = i
+    if (this.reqState && !this.running) this.remember(this.reqState)
+    this.bump()
+  }
+
+  setSettings(patch: Partial<PlannerSettings>, s: GameState, spinRule: SpinRule) {
+    this.settings = { ...this.settings, ...patch }
+    if (patch.enabled === false) {
+      this.cancel()
+      this.bump()
+    } else if (patch.enabled || ((patch.depth !== undefined || patch.beam !== undefined) && !this.following)) {
+      this.search(s, spinRule)
+    } else {
+      this.bump()
+    }
+  }
+
+  /** Fresh search for this state (cancelling any search in flight). */
+  search(s: GameState, spinRule: SpinRule) {
+    this.cancel()
+    this.following = false
+    this.plans = []
+    this.selected = 0
+    this.depthDone = 0
+    const req = this.settings.enabled ? this.requestFor(s, spinRule) : null
+    this.reqState = s
+    if (!req) {
+      this.bump()
+      return
     }
     const id = ++this.reqId
     this.running = true
-    this.depthDone = 0
-    this.pinned = null
-    this.plans = []
-    this.selected = 0
     this.bump()
-    const w = this.ensureWorker()
-    w.postMessage({ id, req } satisfies WorkerIn)
+    this.ensureWorker().postMessage({ id, req } satisfies WorkerIn)
   }
 
   private ensureWorker(): Worker {
@@ -152,17 +232,14 @@ export class PlannerController {
     if (m.id !== this.reqId) return
     if (m.kind === 'progress') {
       this.depthDone = m.depthDone
-      this.nodes = m.nodes
       this.ms = m.ms
-      if (m.depthDone === 0) this.pinned = m.plans[0] ?? null
-      if (this.pinned) this.plans = [this.pinned, ...m.plans.filter((p) => p.summary !== this.pinned?.summary)].slice(0, 3)
-      else if (m.plans.length) this.plans = m.plans
+      if (m.plans.length) this.plans = m.plans
     } else {
       this.plans = m.plans
-      this.pinned = null
       this.ms = m.ms
       this.running = false
       this.depthDone = this.settings.depth
+      if (this.reqState) this.remember(this.reqState)
     }
     if (this.selected >= this.plans.length) this.selected = 0
     this.bump()
@@ -173,11 +250,13 @@ export class PlannerController {
       this.worker.terminate()
       this.worker = null
     }
+    this.reqId++
     this.running = false
   }
 
   dispose() {
     this.worker?.terminate()
     this.worker = null
+    this.running = false
   }
 }
