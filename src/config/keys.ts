@@ -14,6 +14,7 @@ export const KEYS = {
   hold: ['ShiftLeft', 'ShiftRight', 'KeyC'],
   restart: ['KeyR'],
   toggleFinder: ['KeyF'],
+  togglePlan: ['KeyP'],
 } satisfies Record<string, string[]>
 
 export type Action = keyof typeof KEYS

@@ -9,8 +9,9 @@ const ROWS: [string, string][] = [
   ['Ctrl+Z / ⌫', 'undo'],
   ['Ctrl+Y / Ctrl+Shift+Z', 'redo'],
   ['R', 'restart'],
-  ['F', 'spin finder on/off'],
-  ['Tab / Shift+Tab', 'cycle finder candidates'],
+  ['P', 'spin plan on/off'],
+  ['F', 'all-placements overlay on/off'],
+  ['Tab / Shift+Tab', 'next / previous plan (or placement)'],
 ]
 
 export function ControlsHelp() {

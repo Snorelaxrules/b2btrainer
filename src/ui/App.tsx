@@ -4,6 +4,7 @@ import { Hud } from './Hud'
 import { SettingsPanel } from './SettingsPanel'
 import { ControlsHelp } from './ControlsHelp'
 import { FinderPanel } from './FinderPanel'
+import { PlanPanel } from './PlanPanel'
 
 export function App() {
   const [trainer] = useState(() => new Trainer())
@@ -38,6 +39,7 @@ export function App() {
           )}
         </section>
         <aside className="side">
+          <PlanPanel trainer={trainer} />
           <Hud trainer={trainer} />
           <FinderPanel trainer={trainer} />
           <SettingsPanel trainer={trainer} />

@@ -118,7 +118,7 @@ export function FinderPanel({ trainer }: { trainer: Trainer }) {
   return (
     <div className="panel finder">
       <div className="panel-head">
-        <h2>Spin finder</h2>
+        <h2>All placements (this piece)</h2>
         <label className="check inline">
           <input type="checkbox" checked={t.enabled} onChange={toggle({ enabled: !t.enabled })} />
           <span>

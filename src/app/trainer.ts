@@ -15,6 +15,8 @@ import { bindKeyboard } from '../input/keyboard'
 import { type Overlay, Renderer } from '../render/renderer'
 import { FinderOverlay } from '../render/finderOverlay'
 import { FinderController, type FinderToggles } from './finder'
+import { PlanOverlay } from '../render/planOverlay'
+import { PlannerController, type PlannerSettings } from './planner'
 
 export interface TrainerSettings {
   seed: number
@@ -24,6 +26,7 @@ export interface TrainerSettings {
   gravity: GravityMode
   spinRule: SpinRule
   finder: FinderToggles
+  planner: PlannerSettings
 }
 
 const STORAGE_KEY = 'b2btrainer.settings.v1'
@@ -35,7 +38,8 @@ function loadSettings(): TrainerSettings {
     customQueue: '',
     gravity: DEFAULT_RULES.gravity,
     spinRule: DEFAULT_RULES.spinRule,
-    finder: { enabled: true, showOther: false, includeHold: false },
+    finder: { enabled: false, showOther: false, includeHold: false },
+    planner: { enabled: true, depth: 5, beam: 100 },
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -48,7 +52,9 @@ function loadSettings(): TrainerSettings {
       gravity: saved.gravity === 'normal' ? 'normal' : 'none',
       spinRule: saved.spinRule && saved.spinRule in SPIN_RULE_LABELS ? saved.spinRule : base.spinRule,
       seed: saved.lockSeed && typeof saved.seed === 'number' ? saved.seed : base.seed,
-      finder: { ...base.finder, ...(typeof saved.finder === 'object' ? saved.finder : {}) },
+      // the per-piece finder overlay became secondary when the planner arrived: off unless chosen since
+      finder: saved.planner && typeof saved.finder === 'object' ? { ...base.finder, ...saved.finder } : base.finder,
+      planner: { ...base.planner, ...(typeof saved.planner === 'object' ? saved.planner : {}) },
     }
   } catch {
     return base
@@ -60,6 +66,9 @@ export class Trainer {
   readonly session: Session
   readonly input = new InputController(HANDLING)
   readonly finder: FinderController
+  readonly planner: PlannerController
+  /** state as of the last session event (to see what a placement did) */
+  private seen: GameState
   overlays: Overlay[]
   /** a hold triggered by Shift, undone if Tab follows (Shift+Tab cycles the finder) */
   private shiftHold: { before: GameState; after: GameState } | null = null
@@ -73,14 +82,31 @@ export class Trainer {
     this.settings = loadSettings()
     this.session = new Session(this.gameOptions())
     this.finder = new FinderController(this.settings.finder)
-    this.overlays = [new FinderOverlay(this.finder)]
+    this.planner = new PlannerController(this.settings.planner)
+    this.overlays = [new FinderOverlay(this.finder), new PlanOverlay(this.planner)]
     this.finder.recompute(this.session.state)
+    this.seen = this.session.state
     this.session.subscribe((e) => {
+      const s = this.session.state
       if (e === 'over') this.endedAt = performance.now()
-      if (e === 'undo' || e === 'redo') this.endedAt = this.session.state.over ? this.endedAt : null
-      this.finder.recompute(this.session.state)
+      if (e === 'undo' || e === 'redo') this.endedAt = s.over ? this.endedAt : null
+      this.finder.recompute(s)
+      if (e === 'place') {
+        this.planner.notePlacement(this.seen, s)
+        this.planner.request(s, this.settings.spinRule)
+      } else if (e === 'hold') {
+        this.planner.noteHold(s, this.settings.spinRule)
+      } else if (e !== 'over') {
+        this.planner.request(s, this.settings.spinRule)
+      }
+      this.seen = s
       this.bump()
     })
+  }
+
+  setPlanner(patch: Partial<PlannerSettings>) {
+    this.planner.setSettings(patch, this.session.state, this.settings.spinRule)
+    this.update({ planner: this.planner.settings })
   }
 
   setFinder(patch: Partial<FinderToggles>) {
@@ -141,6 +167,7 @@ export class Trainer {
     this.shiftHold = null
     if (action === 'restart') return this.restart(!this.settings.lockSeed)
     if (action === 'toggleFinder') return this.setFinder({ enabled: !this.finder.toggles.enabled })
+    if (action === 'togglePlan') return this.setPlanner({ enabled: !this.planner.settings.enabled })
     if (this.startedAt === null && !this.session.state.over) this.startedAt = t
     const before = this.session.state
     this.input.press(action, t, this.session)
@@ -154,7 +181,8 @@ export class Trainer {
     const sh = this.shiftHold
     this.shiftHold = null
     if (dir < 0 && sh && this.session.state === sh.after) this.session.revert(sh.before)
-    this.finder.cycle(dir)
+    if (this.planner.settings.enabled && this.planner.plans.length) this.planner.cycle(dir)
+    else this.finder.cycle(dir)
   }
 
   /** Attach to a canvas and its container. Returns cleanup (listeners, loop, observer). */
@@ -165,6 +193,7 @@ export class Trainer {
     const ro = new ResizeObserver(fit)
     ro.observe(container)
 
+    this.planner.request(this.session.state, this.settings.spinRule)
     const unbind = bindKeyboard(window, {
       press: (a, t, code) => this.press(a, t, code),
       cycle: (dir) => this.cycle(dir),
@@ -201,6 +230,7 @@ export class Trainer {
     return () => {
       cancelAnimationFrame(raf)
       unbind()
+      this.planner.dispose()
       canvas.removeEventListener('pointermove', pointer)
       canvas.removeEventListener('pointerdown', pointer)
       canvas.removeEventListener('pointerleave', leave)
