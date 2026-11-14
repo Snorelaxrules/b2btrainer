@@ -25,7 +25,7 @@ import {
 } from './game'
 import { type Move, reachablePlacements } from './movegen'
 import { type PieceType, SHAPES } from './pieces'
-import { type ClearResult, type Counters, detectSpin } from './scoring'
+import { type ClearResult, type Counters, detectSpin, spinBasis } from './scoring'
 import { verifyPlan } from './verify'
 import { heights, sealedHoles } from './features'
 
@@ -43,11 +43,17 @@ export interface PlanRequest {
   beam: number
   spinRule: SpinRule
   /**
-   * Plan line clears with non-T spins (All-Mini+ / all-spin). Off by default: those
-   * setups need odd overhangs; with it off, plans keep B2B with T-spins and quads only.
+   * Line clears with "stuck piece" spins: any piece (T included) that only counts as a
+   * spin because it can't move (All-Mini+ / all-spin), as opposed to corner T-spins.
+   *  - 'off': never plan them
+   *  - 'existing' (default): only under an overhang that is already on the board, never
+   *    one the plan's own pieces built (those are the odd cages)
+   *  - 'any': allow them
    */
-  nonTSpins?: boolean
+  miniSpins?: MiniSpinMode
 }
+
+export type MiniSpinMode = 'off' | 'existing' | 'any'
 
 export interface FollowStep {
   piece: ActivePiece
@@ -126,6 +132,8 @@ export const WEIGHTS = {
   attack: 2,
   /** B2B-keeping clears: real T-spins are what we're training, minis only keep the chain alive */
   fullSpinClear: 8,
+  /** per line cleared by a B2B-keeping clear: cleaning the stack without losing the chain */
+  b2bLine: 3,
   quadClear: 6,
   miniSpinClear: 2,
   /** unused while breaks are pruned outright (see expand); kept for experiments */
@@ -319,6 +327,8 @@ interface Node {
   first: string
   /** sealed holes on the starting board */
   rootSealed: number
+  /** which cells the plan itself placed (1) vs the starting board (0), kept in sync with line clears */
+  owned: Uint8Array
 }
 
 function tLeft(n: Node, queue: readonly PieceType[]): boolean {
@@ -353,6 +363,8 @@ function apply(n: Node, c: Candidate, nextCurrent: PieceType | null, hold: Piece
   const r = c.result
   // map rows: drop cleared rows from the mapping
   let rows = n.rows
+  const owned = n.owned.slice()
+  for (const [x, y] of c.cells) owned[y * WIDTH + x] = 1
   if (r.lines) {
     const cleared = new Set<number>()
     for (const [, y] of c.cells) {
@@ -366,6 +378,14 @@ function apply(n: Node, c: Candidate, nextCurrent: PieceType | null, hold: Piece
     let top = rows[rows.length - 1]
     while (kept.length < rows.length) kept.push(++top)
     rows = kept
+    // drop the same rows from the ownership map
+    let to = 0
+    for (let y = 0; y < HEIGHT; y++) {
+      if (cleared.has(y)) continue
+      if (to !== y) owned.copyWithin(to * WIDTH, y * WIDTH, (y + 1) * WIDTH)
+      to++
+    }
+    owned.fill(0, to * WIDTH)
   }
   const step: PlanStep = {
     n: n.steps.length + 1,
@@ -391,13 +411,17 @@ function apply(n: Node, c: Candidate, nextCurrent: PieceType | null, hold: Piece
     b2bClears: n.b2bClears + (keeps ? 1 : 0),
     clearBonus:
       n.clearBonus +
-      (keeps ? (r.spin === 'full' ? WEIGHTS.fullSpinClear : r.spin === 'mini' ? WEIGHTS.miniSpinClear : WEIGHTS.quadClear) : 0),
+      (keeps
+        ? (r.spin === 'full' ? WEIGHTS.fullSpinClear : r.spin === 'mini' ? WEIGHTS.miniSpinClear : WEIGHTS.quadClear) +
+          r.lines * WEIGHTS.b2bLine
+        : 0),
     breaks: n.breaks + (r.b2bChange === 'broken' ? 1 : 0),
     plain: n.plain + (r.lines > 0 && !r.difficult && r.b2bChange !== 'broken' ? 1 : 0),
     eval: evaluateBoard(c.board),
     score: 0,
     first: n.steps.length ? n.first : `${c.viaHold ? 'h' : ''}${cellSetKey(c.cells)}`,
     rootSealed: n.rootSealed,
+    owned,
   }
   step.sealed = child.eval.sealed
   child.score = scoreNode(child, queue)
@@ -426,13 +450,37 @@ function transitions(n: Node, queue: readonly PieceType[]): Transition[] {
   return out
 }
 
-function expand(n: Node, queue: readonly PieceType[], spinRule: SpinRule, nonTSpins = false): Node[] {
+/**
+ * May the plan clear lines with this "stuck piece" spin? Only if the cells
+ * pinning it from above were on the starting board ('existing'), i.e. the plan
+ * uses an overhang you already have instead of building a cage for the spin.
+ */
+function miniSpinAllowed(n: Node, c: Candidate, mode: MiniSpinMode): boolean {
+  if (mode === 'any') return true
+  if (mode === 'off') return false
+  const mine = (x: number, y: number) => c.cells.some(([cx, cy]) => cx === x && cy === y)
+  let roofed = false
+  for (const [x, y] of c.cells) {
+    if (mine(x, y + 1) || y + 1 >= HEIGHT || !n.board[(y + 1) * WIDTH + x]) continue
+    roofed = true
+    if (n.owned[(y + 1) * WIDTH + x]) return false // the plan built this roof
+  }
+  return roofed
+}
+
+function expand(n: Node, queue: readonly PieceType[], spinRule: SpinRule, miniSpins: MiniSpinMode = 'existing'): Node[] {
   const out: Node[] = []
   for (const t of transitions(n, queue)) {
     for (const c of findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule })) {
       // never suggest breaking back-to-back: such placements are not part of any plan
       if (c.result.b2bChange === 'broken') continue
-      if (!nonTSpins && c.result.lines > 0 && c.result.spin !== 'none' && c.piece.type !== 'T') continue
+      if (
+        c.result.lines > 0 &&
+        c.result.spin !== 'none' &&
+        spinBasis(n.board, c.piece) === 'immobile' &&
+        !miniSpinAllowed(n, c, miniSpins)
+      )
+        continue
       out.push(apply(n, c, t.nextCurrent, t.hold, t.next, queue))
     }
   }
@@ -505,6 +553,7 @@ function rootNode(req: PlanRequest): Node {
     score: 0,
     first: '',
     rootSealed: 0,
+    owned: new Uint8Array(WIDTH * HEIGHT),
   }
   root.rootSealed = root.eval.sealed
   root.score = scoreNode(root, req.queue)
@@ -555,7 +604,7 @@ export function searchPlans(
   for (let d = 1; d <= depth; d++) {
     const children: Node[] = []
     for (const n of beam) {
-      const kids = expand(n, req.queue, req.spinRule, req.nonTSpins)
+      const kids = expand(n, req.queue, req.spinRule, req.miniSpins)
       nodes += kids.length
       children.push(...kids)
     }

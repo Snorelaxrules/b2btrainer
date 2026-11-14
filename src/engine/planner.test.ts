@@ -110,4 +110,38 @@ describe('planner', () => {
     }
     expect(sealedHoles(board)).toBe(0)
   })
+
+  describe('mini spins (pieces stuck under an overhang)', () => {
+    // from a player's screenshot: a hole at (4,1) beside a well; a J can 180 into it
+    const SHOT = boardFromRows(['####......', '####....##', '#####..###', '#####.####', '####..####', '#####.####'])
+    const req = (miniSpins: 'off' | 'existing' | 'any') => ({
+      board: SHOT,
+      counters: { b2b: 3, combo: -1 },
+      current: 'I' as const,
+      hold: 'J' as const,
+      holdUsed: false,
+      queue: ['L', 'T', 'O', 'S', 'Z'] as ('L' | 'T' | 'O' | 'S' | 'Z')[],
+      depth: 5,
+      beam: 100,
+      spinRule: 'allmini+' as const,
+      miniSpins,
+    })
+    const labels = (plans: ReturnType<typeof searchPlans>) => plans.flatMap((p) => p.steps.map((s) => s.result.label))
+
+    it('default: takes the J 180 spin into the existing hole (cleans the stack, keeps B2B)', () => {
+      const plans = searchPlans(req('existing'))
+      expect(plans[0].steps[0]).toMatchObject({ type: 'J', viaHold: true })
+      expect(plans[0].steps[0].result.label).toBe('J-Spin Mini Double')
+      expect(plans[0].steps[0].path).toContain('flip')
+    })
+
+    it('default: never builds a cage for a stuck-piece spin (the I-spin under a J the plan placed)', () => {
+      expect(labels(searchPlans(req('existing')))).not.toContain('I-Spin Mini Single')
+      expect(labels(searchPlans(req('any')))).toContain('I-Spin Mini Single')
+    })
+
+    it("'off': no stuck-piece spin clears at all", () => {
+      expect(labels(searchPlans(req('off'))).filter((l) => /Spin/.test(l) && !/^TS|^T-Spin/.test(l))).toEqual([])
+    })
+  })
 })

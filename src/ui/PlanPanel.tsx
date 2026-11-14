@@ -131,16 +131,19 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
         )}
       </div>
 
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={st.nonTSpins}
+      <label className="field">
+        <span>Mini spins (pieces stuck under an overhang, incl. T without 3 corners)</span>
+        <select
+          value={st.miniSpins}
           onChange={(e) => {
-            trainer.setPlanner({ nonTSpins: e.target.checked })
+            trainer.setPlanner({ miniSpins: e.target.value as typeof st.miniSpins })
             blur(e)
           }}
-        />
-        <span>Allow non-T mini spins (odd overhangs)</span>
+        >
+          <option value="existing">Only into overhangs already in my stack</option>
+          <option value="off">Never (corner T-spins and quads only)</option>
+          <option value="any">Any (may build cages for them)</option>
+        </select>
       </label>
 
       {pl.note && <p className="plan-note">{pl.note}</p>}

@@ -39,7 +39,7 @@ function loadSettings(): TrainerSettings {
     gravity: DEFAULT_RULES.gravity,
     spinRule: DEFAULT_RULES.spinRule,
     finder: { enabled: false, showOther: false, includeHold: false },
-    planner: { depth: 5, beam: 100, nonTSpins: false },
+    planner: { depth: 5, beam: 100, miniSpins: 'existing' },
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -57,7 +57,7 @@ function loadSettings(): TrainerSettings {
       planner: {
         depth: typeof saved.planner?.depth === 'number' ? saved.planner.depth : base.planner.depth,
         beam: typeof saved.planner?.beam === 'number' ? saved.planner.beam : base.planner.beam,
-        nonTSpins: saved.planner?.nonTSpins === true,
+        miniSpins: (['off', 'existing', 'any'] as const).find((m) => m === saved.planner?.miniSpins) ?? 'existing',
       },
     }
   } catch {

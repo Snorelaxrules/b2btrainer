@@ -3,6 +3,7 @@ import * as G from './game'
 import { findPlacements } from './finder'
 import { type PlanRequest, replayPlan, searchPlans, tSlotLines } from './planner'
 import { verifyPlan } from './verify'
+import { spinBasis } from './scoring'
 
 function rng(seed: number) {
   let a = seed >>> 0
@@ -51,8 +52,38 @@ it('every plan the planner returns replays exactly in the real engine', { timeou
     for (const p of plans) {
       total++
       if (p.steps.some((st) => st.result.b2bChange === 'broken')) failures.push(`seed ${seed}: ${p.summary} breaks B2B`)
-      if (p.steps.some((st) => st.result.lines > 0 && st.result.spin !== 'none' && st.type !== 'T'))
-        failures.push(`seed ${seed}: ${p.summary} clears with a non-T spin while those are off`)
+      // default mini-spin mode: a stuck-piece spin clear must sit under a roof that was
+      // already on the starting board, never one an earlier step of the plan placed
+      {
+        let st = s as G.GameState
+        let owned = new Uint8Array(G.WIDTH * G.HEIGHT)
+        for (const step of p.steps) {
+          if (step.viaHold) st = G.hold(st)
+          const cells = G.pieceCells(step.piece)
+          if (step.result.lines > 0 && step.result.spin !== 'none' && spinBasis(st.board, step.piece) === 'immobile') {
+            const own = (x: number, y: number) => owned[y * G.WIDTH + x] === 1
+            const roofs = cells.filter(
+              ([x, y]) => !cells.some(([a, b]) => a === x && b === y + 1) && G.cellAt(st.board, x, y + 1),
+            )
+            if (roofs.some(([x, y]) => own(x, y + 1))) failures.push(`seed ${seed}: ${p.summary} spins under a roof the plan built`)
+          }
+          // ownership after this lock: mark the piece, then drop the rows it clears
+          const marked = owned.slice()
+          for (const [x, y] of cells) marked[y * G.WIDTH + x] = 1
+          const withPiece = G.placeOnBoard(st.board, step.piece)
+          const next = new Uint8Array(G.WIDTH * G.HEIGHT)
+          let to = 0
+          for (let y = 0; y < G.HEIGHT; y++) {
+            let full = true
+            for (let x = 0; x < G.WIDTH && full; x++) if (!withPiece[y * G.WIDTH + x]) full = false
+            if (full) continue
+            next.set(marked.subarray(y * G.WIDTH, (y + 1) * G.WIDTH), to * G.WIDTH)
+            to++
+          }
+          owned = next
+          st = G.lockPiece(st, step.piece)
+        }
+      }
       if (p.slotAfter) {
         // the slot the plan claims to leave must be reachable by a real T, as a full spin
         let after = s

@@ -16,7 +16,7 @@
  */
 import type { SpinRule } from '../config/scoring'
 import { type GameState, pieceCells } from '../engine/game'
-import { type Plan, type PlanRequest, replayPlan } from '../engine/planner'
+import { type MiniSpinMode, type Plan, type PlanRequest, replayPlan } from '../engine/planner'
 import { verifyPlan } from '../engine/verify'
 import type { WorkerIn, WorkerOut } from '../search/planner.worker'
 
@@ -25,8 +25,8 @@ export interface PlannerSettings {
   depth: number
   /** beam width */
   beam: number
-  /** allow plans that clear with non-T (mini) spins */
-  nonTSpins: boolean
+  /** "stuck piece" mini spins: off / only into overhangs already on the board / any */
+  miniSpins: MiniSpinMode
 }
 
 export const BEAM_PRESETS = [
@@ -103,7 +103,7 @@ export class PlannerController {
       depth: this.settings.depth,
       beam: this.settings.beam,
       spinRule,
-      nonTSpins: this.settings.nonTSpins,
+      miniSpins: this.settings.miniSpins,
     }
   }
 

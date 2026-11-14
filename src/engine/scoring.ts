@@ -66,6 +66,18 @@ function immobile(board: Board, p: Piece): boolean {
 }
 
 /**
+ * Why a spin counts: 'corner' = a T passing the 3-corner rule (a real T-spin or
+ * T-spin mini); 'immobile' = any piece (T included) that only counts because it
+ * can't move after rotating (All-Mini+ / all-spin). Call only for actual spins.
+ */
+export function spinBasis(board: Board, p: Piece): 'corner' | 'immobile' {
+  if (p.type !== 'T') return 'immobile'
+  let n = 0
+  for (const [dx, dy] of T_CORNERS) if (occupied(board, p.x + dx, p.y - dy)) n++
+  return n >= 3 ? 'corner' : 'immobile'
+}
+
+/**
  * Spin kind for `p` locking on `board` (the board before the piece is placed).
  * Requires that the last action was a rotation (p.rotated).
  */
