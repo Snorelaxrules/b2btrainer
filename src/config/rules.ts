@@ -1,6 +1,8 @@
 /**
  * Game rules that are not scoring (scoring lives in src/config/scoring.ts).
  */
+import { DEFAULT_SPIN_RULE, type SpinRule } from './scoring'
+
 export type GravityMode = 'none' | 'normal'
 
 export interface Rules {
@@ -17,6 +19,8 @@ export interface Rules {
   maxLockResets: number
   /** pieces shown in the next queue */
   previews: number
+  /** which spins count (see src/config/scoring.ts) */
+  spinRule: SpinRule
 }
 
 export const DEFAULT_RULES: Rules = {
@@ -25,4 +29,5 @@ export const DEFAULT_RULES: Rules = {
   lockDelay: 500,
   maxLockResets: 15,
   previews: 5,
+  spinRule: DEFAULT_SPIN_RULE,
 }

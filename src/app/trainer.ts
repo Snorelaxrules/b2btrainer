@@ -6,6 +6,7 @@
 import { HANDLING } from '../config/handling'
 import type { Action } from '../config/keys'
 import { DEFAULT_RULES, type GravityMode, type Rules } from '../config/rules'
+import { SPIN_RULE_LABELS, type SpinRule } from '../config/scoring'
 import { parseQueue } from '../engine/game'
 import { randomSeed } from '../engine/rng'
 import { Session } from '../engine/session'
@@ -19,12 +20,19 @@ export interface TrainerSettings {
   lockSeed: boolean
   customQueue: string
   gravity: GravityMode
+  spinRule: SpinRule
 }
 
 const STORAGE_KEY = 'b2btrainer.settings.v1'
 
 function loadSettings(): TrainerSettings {
-  const base: TrainerSettings = { seed: randomSeed(), lockSeed: false, customQueue: '', gravity: DEFAULT_RULES.gravity }
+  const base: TrainerSettings = {
+    seed: randomSeed(),
+    lockSeed: false,
+    customQueue: '',
+    gravity: DEFAULT_RULES.gravity,
+    spinRule: DEFAULT_RULES.spinRule,
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return base
@@ -34,6 +42,7 @@ function loadSettings(): TrainerSettings {
       lockSeed: !!saved.lockSeed,
       customQueue: typeof saved.customQueue === 'string' ? saved.customQueue : '',
       gravity: saved.gravity === 'normal' ? 'normal' : 'none',
+      spinRule: saved.spinRule && saved.spinRule in SPIN_RULE_LABELS ? saved.spinRule : base.spinRule,
       seed: saved.lockSeed && typeof saved.seed === 'number' ? saved.seed : base.seed,
     }
   } catch {
@@ -63,7 +72,7 @@ export class Trainer {
   }
 
   get rules(): Rules {
-    return { ...DEFAULT_RULES, gravity: this.settings.gravity }
+    return { ...DEFAULT_RULES, gravity: this.settings.gravity, spinRule: this.settings.spinRule }
   }
 
   private gameOptions() {
@@ -92,7 +101,7 @@ export class Trainer {
 
   update(patch: Partial<TrainerSettings>) {
     this.settings = { ...this.settings, ...patch }
-    if (patch.gravity) this.session.setRules(this.rules)
+    if (patch.gravity || patch.spinRule) this.session.setRules(this.rules)
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings))
     } catch {

@@ -22,7 +22,9 @@ export function ControlsHelp() {
           {ROWS.map(([k, v]) => (
             <tr key={k}>
               <td>
-                <kbd>{k}</kbd>
+                {k.split(' / ').map((key) => (
+                  <kbd key={key}>{key}</kbd>
+                ))}
               </td>
               <td>{v}</td>
             </tr>

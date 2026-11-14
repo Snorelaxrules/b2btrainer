@@ -100,6 +100,14 @@ export class Session {
     return true
   }
 
+  /** Start from an arbitrary state (puzzles, tests); clears history. */
+  load(state: GameState) {
+    this.state = this.turnStart = state
+    this.undoStack = []
+    this.redoStack = []
+    this.emit('restart')
+  }
+
   restart(opts: NewGameOptions) {
     this.state = this.turnStart = G.newGame(opts)
     this.undoStack = []

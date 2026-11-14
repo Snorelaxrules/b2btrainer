@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Trainer } from '../app/trainer'
 import { parseQueue } from '../engine/game'
+import { SPIN_RULE_LABELS, type SpinRule } from '../config/scoring'
 
 /** Buttons give focus back to the game so Space doesn't re-click them. */
 function blurAfter(fn: () => void) {
@@ -90,6 +91,23 @@ export function SettingsPanel({ trainer }: { trainer: Trainer }) {
         >
           <option value="none">None (lock on hard drop only)</option>
           <option value="normal">Normal (0.5 s lock delay, 15 resets)</option>
+        </select>
+      </label>
+
+      <label className="field">
+        <span>Spin rules</span>
+        <select
+          value={st.spinRule}
+          onChange={(e) => {
+            trainer.update({ spinRule: e.target.value as SpinRule })
+            e.currentTarget.blur()
+          }}
+        >
+          {(Object.keys(SPIN_RULE_LABELS) as SpinRule[]).map((r) => (
+            <option key={r} value={r}>
+              {SPIN_RULE_LABELS[r]}
+            </option>
+          ))}
         </select>
       </label>
     </div>

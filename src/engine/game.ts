@@ -12,6 +12,7 @@
 import { DEFAULT_RULES, type Rules } from '../config/rules'
 import { BOX_SIZE, PIECES, type PieceType, type Rotation, SHAPES, kickTests } from './pieces'
 import { type BagState, drawPiece, newBag } from './rng'
+import { type ClearResult, type Counters, NO_COUNTERS, resolveLock } from './scoring'
 
 export const WIDTH = 10
 export const VISIBLE = 20
@@ -54,13 +55,25 @@ export interface Stats {
   readonly pieces: number
   readonly lines: number
   readonly holds: number
+  readonly attack: number
+  /** longest displayed B2B reached */
+  readonly maxB2B: number
+  /** count per clear label for spins, quads and all clears ("TSD", "Quad", "S-Spin Mini", …) */
+  readonly clears: Readonly<Record<string, number>>
+  readonly surgeSent: number
 }
 
-/** What the most recent lock did. Scoring fields are added by the scoring module. */
+/** What a lock did. */
 export interface Placement {
   readonly piece: ActivePiece
   readonly lines: number
+  readonly result: ClearResult
+  /** pieces placed when this happened (1-based) */
+  readonly n: number
 }
+
+/** how many recent clears/spins the state keeps for the HUD */
+const RECENT_KEEP = 12
 
 export type GameOver = false | 'blockout' | 'lockout'
 
@@ -80,7 +93,10 @@ export interface GameState {
   /** game time in ms, only advanced by tick() */
   readonly time: number
   readonly stats: Stats
+  readonly counters: Counters
   readonly last: Placement | null
+  /** recent placements that cleared lines or spun, newest first */
+  readonly recent: readonly Placement[]
 }
 
 export interface NewGameOptions {
@@ -230,8 +246,10 @@ export function newGame(opts: NewGameOptions): GameState {
     lock: FRESH_LOCK,
     pieceId: 0,
     time: 0,
-    stats: { pieces: 0, lines: 0, holds: 0 },
+    stats: { pieces: 0, lines: 0, holds: 0, attack: 0, maxB2B: 0, clears: {}, surgeSent: 0 },
+    counters: NO_COUNTERS,
     last: null,
+    recent: [],
   }
   return spawnNext(base)
 }
@@ -353,10 +371,31 @@ export function hardDrop(s: GameState): GameState {
 /** Lock `p` where it is: write it, clear lines, spawn the next piece. */
 export function lockPiece(s: GameState, p: ActivePiece): GameState {
   const cells = pieceCells(p)
-  const board = placeOnBoard(s.board, p)
-  const lines = clearLines(board)
-  const stats = { ...s.stats, pieces: s.stats.pieces + 1, lines: s.stats.lines + lines }
-  const next: GameState = { ...s, board, active: null, holdUsed: false, stats, last: { piece: p, lines } }
+  const { board, result } = resolveLock(s.board, p, s.counters, s.rules.spinRule)
+  const lines = result.lines
+  const notable = result.spin !== 'none' || result.lines >= 4 || result.allClear
+  const st = s.stats
+  const stats: Stats = {
+    ...st,
+    pieces: st.pieces + 1,
+    lines: st.lines + lines,
+    attack: st.attack + result.attack,
+    maxB2B: Math.max(st.maxB2B, result.after.b2b),
+    clears: notable ? { ...st.clears, [result.label]: (st.clears[result.label] ?? 0) + 1 } : st.clears,
+    surgeSent: st.surgeSent + result.surge,
+  }
+  const last: Placement = { piece: p, lines, result, n: stats.pieces }
+  const recent = lines > 0 || result.spin !== 'none' ? [last, ...s.recent].slice(0, RECENT_KEEP) : s.recent
+  const next: GameState = {
+    ...s,
+    board,
+    active: null,
+    holdUsed: false,
+    stats,
+    counters: result.after,
+    last,
+    recent,
+  }
   // lock out: the whole piece came to rest above the visible field
   if (cells.every(([, y]) => y >= VISIBLE)) return { ...next, over: 'lockout' }
   return spawnNext(next)
