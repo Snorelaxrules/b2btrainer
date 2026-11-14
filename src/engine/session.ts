@@ -100,6 +100,12 @@ export class Session {
     return true
   }
 
+  /** Replace the current state without touching history (only for un-doing a hold within a turn). */
+  revert(state: GameState) {
+    this.state = state
+    this.emit('hold')
+  }
+
   /** Start from an arbitrary state (puzzles, tests); clears history. */
   load(state: GameState) {
     this.state = this.turnStart = state

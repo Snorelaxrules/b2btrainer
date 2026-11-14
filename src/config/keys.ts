@@ -26,6 +26,8 @@ export const COMMAND_KEYS = {
   redo: ['KeyY'],
   /** without modifiers */
   undoPlain: ['Backspace'],
+  /** spin finder: next candidate (with Shift: previous) */
+  cycle: ['Tab'],
 }
 
 export const KEY_ACTIONS: ReadonlyMap<string, Action> = new Map(

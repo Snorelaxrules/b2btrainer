@@ -5,7 +5,9 @@
 import { type Action, COMMAND_KEYS, KEY_ACTIONS } from '../config/keys'
 
 export interface KeyboardHandlers {
-  press(action: Action, t: number): void
+  press(action: Action, t: number, code: string): void
+  /** Tab / Shift+Tab: cycle spin-finder candidates */
+  cycle(dir: 1 | -1): void
   release(action: Action, t: number): void
   undo(): void
   redo(): void
@@ -41,6 +43,11 @@ export function bindKeyboard(target: Window, h: KeyboardHandlers): () => void {
       }
       return
     }
+    if (COMMAND_KEYS.cycle.includes(e.code)) {
+      e.preventDefault()
+      h.cycle(e.shiftKey ? -1 : 1)
+      return
+    }
     if (COMMAND_KEYS.undoPlain.includes(e.code)) {
       e.preventDefault()
       h.undo()
@@ -50,7 +57,7 @@ export function bindKeyboard(target: Window, h: KeyboardHandlers): () => void {
     if (!action) return
     e.preventDefault()
     if (e.repeat) return
-    h.press(action, stamp(e))
+    h.press(action, stamp(e), e.code)
   }
   const up = (e: KeyboardEvent) => {
     const action = KEY_ACTIONS.get(e.code)

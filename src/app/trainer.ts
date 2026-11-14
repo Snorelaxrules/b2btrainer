@@ -7,12 +7,14 @@ import { HANDLING } from '../config/handling'
 import type { Action } from '../config/keys'
 import { DEFAULT_RULES, type GravityMode, type Rules } from '../config/rules'
 import { SPIN_RULE_LABELS, type SpinRule } from '../config/scoring'
-import { parseQueue } from '../engine/game'
+import { type GameState, parseQueue } from '../engine/game'
 import { randomSeed } from '../engine/rng'
 import { Session } from '../engine/session'
 import { InputController } from '../input/controller'
 import { bindKeyboard } from '../input/keyboard'
 import { type Overlay, Renderer } from '../render/renderer'
+import { FinderOverlay } from '../render/finderOverlay'
+import { FinderController, type FinderToggles } from './finder'
 
 export interface TrainerSettings {
   seed: number
@@ -21,6 +23,7 @@ export interface TrainerSettings {
   customQueue: string
   gravity: GravityMode
   spinRule: SpinRule
+  finder: FinderToggles
 }
 
 const STORAGE_KEY = 'b2btrainer.settings.v1'
@@ -32,6 +35,7 @@ function loadSettings(): TrainerSettings {
     customQueue: '',
     gravity: DEFAULT_RULES.gravity,
     spinRule: DEFAULT_RULES.spinRule,
+    finder: { enabled: true, showOther: false, includeHold: false },
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -44,6 +48,7 @@ function loadSettings(): TrainerSettings {
       gravity: saved.gravity === 'normal' ? 'normal' : 'none',
       spinRule: saved.spinRule && saved.spinRule in SPIN_RULE_LABELS ? saved.spinRule : base.spinRule,
       seed: saved.lockSeed && typeof saved.seed === 'number' ? saved.seed : base.seed,
+      finder: { ...base.finder, ...(typeof saved.finder === 'object' ? saved.finder : {}) },
     }
   } catch {
     return base
@@ -54,7 +59,10 @@ export class Trainer {
   settings: TrainerSettings
   readonly session: Session
   readonly input = new InputController(HANDLING)
-  overlays: Overlay[] = []
+  readonly finder: FinderController
+  overlays: Overlay[]
+  /** a hold triggered by Shift, undone if Tab follows (Shift+Tab cycles the finder) */
+  private shiftHold: { before: GameState; after: GameState } | null = null
   /** wall-clock start of the current game (first input), for PPS/APM */
   private startedAt: number | null = null
   private endedAt: number | null = null
@@ -64,11 +72,20 @@ export class Trainer {
   constructor() {
     this.settings = loadSettings()
     this.session = new Session(this.gameOptions())
+    this.finder = new FinderController(this.settings.finder)
+    this.overlays = [new FinderOverlay(this.finder)]
+    this.finder.recompute(this.session.state)
     this.session.subscribe((e) => {
       if (e === 'over') this.endedAt = performance.now()
       if (e === 'undo' || e === 'redo') this.endedAt = this.session.state.over ? this.endedAt : null
+      this.finder.recompute(this.session.state)
       this.bump()
     })
+  }
+
+  setFinder(patch: Partial<FinderToggles>) {
+    this.finder.setToggles(patch, this.session.state)
+    this.update({ finder: this.finder.toggles })
   }
 
   get rules(): Rules {
@@ -102,6 +119,7 @@ export class Trainer {
   update(patch: Partial<TrainerSettings>) {
     this.settings = { ...this.settings, ...patch }
     if (patch.gravity || patch.spinRule) this.session.setRules(this.rules)
+    if (patch.spinRule) this.finder.recompute(this.session.state, true)
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings))
     } catch {
@@ -119,11 +137,24 @@ export class Trainer {
     this.session.restart(this.gameOptions())
   }
 
-  private press(action: Action, t: number) {
+  private press(action: Action, t: number, code: string) {
+    this.shiftHold = null
     if (action === 'restart') return this.restart(!this.settings.lockSeed)
-    if (action === 'toggleFinder') return // wired up with the spin finder (step 3)
+    if (action === 'toggleFinder') return this.setFinder({ enabled: !this.finder.toggles.enabled })
     if (this.startedAt === null && !this.session.state.over) this.startedAt = t
+    const before = this.session.state
     this.input.press(action, t, this.session)
+    if (action === 'hold' && code.startsWith('Shift') && this.session.state !== before) {
+      this.shiftHold = { before, after: this.session.state }
+    }
+  }
+
+  private cycle(dir: 1 | -1) {
+    // Shift is also the hold key: if this Shift press just held, take the hold back
+    const sh = this.shiftHold
+    this.shiftHold = null
+    if (dir < 0 && sh && this.session.state === sh.after) this.session.revert(sh.before)
+    this.finder.cycle(dir)
   }
 
   /** Attach to a canvas and its container. Returns cleanup (listeners, loop, observer). */
@@ -135,12 +166,25 @@ export class Trainer {
     ro.observe(container)
 
     const unbind = bindKeyboard(window, {
-      press: (a, t) => this.press(a, t),
+      press: (a, t, code) => this.press(a, t, code),
+      cycle: (dir) => this.cycle(dir),
       release: (a, t) => this.input.release(a, t),
       undo: () => this.session.undo(),
       redo: () => this.session.redo(),
       blur: () => this.input.reset(),
     })
+
+    const pointer = (e: PointerEvent) => {
+      const r = canvas.getBoundingClientRect()
+      const cell = renderer.view.cellAt(e.clientX - r.left, e.clientY - r.top)
+      const c = cell ? this.finder.candidateAt(cell[0], cell[1]) : null
+      if (e.type === 'pointerdown') this.finder.select(c ? c.id : null)
+      else this.finder.hover(c ? c.id : null)
+    }
+    const leave = () => this.finder.hover(null)
+    canvas.addEventListener('pointermove', pointer)
+    canvas.addEventListener('pointerdown', pointer)
+    canvas.addEventListener('pointerleave', leave)
 
     let raf = 0
     let last = performance.now()
@@ -157,6 +201,9 @@ export class Trainer {
     return () => {
       cancelAnimationFrame(raf)
       unbind()
+      canvas.removeEventListener('pointermove', pointer)
+      canvas.removeEventListener('pointerdown', pointer)
+      canvas.removeEventListener('pointerleave', leave)
       ro.disconnect()
       this.input.reset()
     }

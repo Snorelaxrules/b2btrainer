@@ -9,6 +9,8 @@ const ROWS: [string, string][] = [
   ['Ctrl+Z / ⌫', 'undo'],
   ['Ctrl+Y / Ctrl+Shift+Z', 'redo'],
   ['R', 'restart'],
+  ['F', 'spin finder on/off'],
+  ['Tab / Shift+Tab', 'cycle finder candidates'],
 ]
 
 export function ControlsHelp() {

@@ -5,6 +5,7 @@
 import { PIECE_COLORS, THEME } from '../config/theme'
 import { CODE_PIECE, type GameState, type Piece, WIDTH, cellAt, ghost, pieceCells } from '../engine/game'
 import { type PieceType, SHAPES } from '../engine/pieces'
+import { surgeFor } from '../engine/scoring'
 
 /** rows drawn: the 20 visible plus this many of the hidden buffer (where pieces spawn) */
 export const BUFFER_SHOWN = 3
@@ -29,6 +30,8 @@ export interface BoardView {
   rows: number
   /** canvas-pixel rectangle of board cell (x, y) (y from the bottom) */
   rect(x: number, y: number): [number, number, number, number]
+  /** board cell under a CSS-pixel point on the canvas, or null */
+  cellAt(px: number, py: number): [number, number] | null
 }
 
 export class Renderer {
@@ -72,6 +75,11 @@ export class Renderer {
       top,
       rows: ROWS,
       rect: (x, y) => [left + x * cell, top + (ROWS - 1 - y) * cell, cell, cell],
+      cellAt: (px, py) => {
+        const x = Math.floor((px - left) / cell)
+        const y = ROWS - 1 - Math.floor((py - top) / cell)
+        return x >= 0 && x < WIDTH && y >= 0 && y < ROWS ? [x, y] : null
+      },
     }
   }
 
@@ -134,11 +142,33 @@ export class Renderer {
     const sideW = SIDE * cell
     this.label('HOLD', 0, v.top + BUFFER_SHOWN * cell)
     if (s.hold) this.mini(s.hold, 0, v.top + (BUFFER_SHOWN + 0.6) * cell, sideW, s.holdUsed)
+    this.counters(s, v.top + (BUFFER_SHOWN + 4.4) * cell, sideW)
     const nx = v.left + WIDTH * cell + GAP * cell
     this.label('NEXT', nx, v.top + BUFFER_SHOWN * cell)
     s.queue.slice(0, s.rules.previews).forEach((t, i) => {
       this.mini(t, nx, v.top + (BUFFER_SHOWN + 0.6 + i * 2.8) * cell, sideW, false)
     })
+  }
+
+  /** big B2B and Surge numbers under the hold box */
+  private counters(s: GameState, y: number, w: number) {
+    const { ctx, cell } = this
+    const b2b = s.counters.b2b
+    const surge = surgeFor(b2b)
+    const big = (label: string, value: string, color: string, top: number) => {
+      ctx.textAlign = 'right'
+      ctx.textBaseline = 'top'
+      ctx.fillStyle = THEME.label
+      ctx.font = `600 ${Math.round(cell * 0.5)}px ui-sans-serif, system-ui, sans-serif`
+      ctx.fillText(label, w - cell * 0.3, top)
+      ctx.fillStyle = color
+      ctx.font = `800 ${Math.round(cell * 1.7)}px ui-sans-serif, system-ui, sans-serif`
+      ctx.fillText(value, w - cell * 0.3, top + cell * 0.6)
+      ctx.textAlign = 'left'
+    }
+    big('B2B', b2b >= 1 ? `×${b2b}` : '0', b2b >= 1 ? '#7ee08a' : 'rgba(255,255,255,0.25)', y)
+    big('SURGE', String(surge), surge ? '#ffb347' : 'rgba(255,255,255,0.25)', y + cell * 3)
+    if (s.counters.combo >= 1) big('COMBO', String(s.counters.combo), '#e6e8ee', y + cell * 6)
   }
 
   private label(text: string, x: number, y: number) {

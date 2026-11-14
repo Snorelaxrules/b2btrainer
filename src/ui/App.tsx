@@ -3,9 +3,12 @@ import { Trainer } from '../app/trainer'
 import { Hud } from './Hud'
 import { SettingsPanel } from './SettingsPanel'
 import { ControlsHelp } from './ControlsHelp'
+import { FinderPanel } from './FinderPanel'
 
 export function App() {
   const [trainer] = useState(() => new Trainer())
+  // dev-only handle for debugging and browser tests; stripped from production builds
+  if (import.meta.env.DEV) (window as unknown as { __trainer: Trainer }).__trainer = trainer
   useSyncExternalStore(trainer.subscribe, trainer.getVersion)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
@@ -36,6 +39,7 @@ export function App() {
         </section>
         <aside className="side">
           <Hud trainer={trainer} />
+          <FinderPanel trainer={trainer} />
           <SettingsPanel trainer={trainer} />
           <ControlsHelp />
         </aside>
