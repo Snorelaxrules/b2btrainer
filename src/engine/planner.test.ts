@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { boardFromRows, emptyBoard } from './game'
 import { searchPlans, tSlotLines } from './planner'
+import { sealedHoles } from './features'
+
+const NO_STREAK = { b2b: -1, combo: -1 }
 
 /** TSD slot at columns 0–2 under an overhang at (0,2) */
 const TSD_READY = boardFromRows([
@@ -9,6 +12,15 @@ const TSD_READY = boardFromRows([
   '#...######',
   '##.#######',
 ])
+
+describe('sealed holes', () => {
+  it('a boxed-in cell is sealed; an overhang open to the side is not', () => {
+    expect(sealedHoles(boardFromRows(['###.......', '#.#.......', '###.......']))).toBe(1)
+    expect(sealedHoles(boardFromRows(['##........', '#.........', '###.......']))).toBe(0)
+    // a TSD slot's cavity is reachable through the slot, so it is not sealed
+    expect(sealedHoles(boardFromRows(['#.........', '##........', '#...######', '##.#######']))).toBe(0)
+  })
+})
 
 describe('T-slot detection', () => {
   it('sees a TSD slot', () => {
@@ -75,5 +87,27 @@ describe('planner', () => {
     })
     expect(plans.length).toBeGreaterThan(0)
     for (const p of plans) for (const st of p.steps) expect(st.result.b2bChange).not.toBe('broken')
+  })
+
+  it('does not seal a hole when it can stack elsewhere', () => {
+    // a 1-wide gap at column 1 that O pieces can't fill: covering it would seal it
+    const board = boardFromRows(['#.########'])
+    const plans = searchPlans({
+      board,
+      counters: NO_STREAK,
+      current: 'O',
+      hold: null,
+      holdUsed: false,
+      queue: ['O', 'O', 'O', 'O'],
+      depth: 5,
+      beam: 60,
+      spinRule: 'allmini+',
+    })
+    expect(plans.length).toBeGreaterThan(0)
+    for (const p of plans) {
+      expect(p.newSealed).toBe(0)
+      for (const st of p.steps) expect(st.sealed).toBe(0)
+    }
+    expect(sealedHoles(board)).toBe(0)
   })
 })

@@ -8,6 +8,7 @@ import { type ActivePiece, type Board, type Cell, HEIGHT, VISIBLE, WIDTH, fits, 
 import { type Move, cellsKey, reachablePlacements } from './movegen'
 import type { PieceType, Rotation } from './pieces'
 import { type ClearResult, type Counters, detectSpin, resolveLock } from './scoring'
+import { sealedHoles } from './features'
 
 export type Category =
   /** spin or quad clear that starts/keeps B2B */
@@ -35,6 +36,8 @@ export interface Candidate {
   board: Board
   /** holes after minus holes before (negative = opened some) */
   newHoles: number
+  /** sealed (unreachable) holes after minus before */
+  newSealed: number
   /** the resulting board has a T-spin slot (full spin, ≥1 line) that the board before did not */
   makesSlot: number
 }
@@ -115,6 +118,7 @@ export function findPlacements(
 ): Candidate[] {
   const cfg = opts.cfg ?? SCORING
   const holesBefore = countHoles(board)
+  const sealedBefore = sealedHoles(board)
   const slotBefore = opts.slots ? bestTSlot(board) : 0
   // group by covered cells; keep the strongest spin, then the shortest path
   const best = new Map<string, { r: ReturnType<typeof reachablePlacements>[number]; spin: number; cells: Cell[] }>()
@@ -141,6 +145,7 @@ export function findPlacements(
       category: categorize(result),
       board: after,
       newHoles: countHoles(after) - holesBefore,
+      newSealed: sealedHoles(after) - sealedBefore,
       makesSlot: slotAfter > slotBefore ? slotAfter : 0,
     })
   }

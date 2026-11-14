@@ -27,6 +27,7 @@ import { type Move, reachablePlacements } from './movegen'
 import { type PieceType, SHAPES } from './pieces'
 import { type ClearResult, type Counters, detectSpin } from './scoring'
 import { verifyPlan } from './verify'
+import { heights, sealedHoles } from './features'
 
 export interface PlanRequest {
   board: Board
@@ -63,6 +64,8 @@ export interface PlanStep {
   result: ClearResult
   /** cells in the coordinates of the board the plan started from (earlier line clears undone) */
   cells: Cell[]
+  /** sealed holes on the board right after this step */
+  sealed: number
 }
 
 export interface Plan {
@@ -77,6 +80,8 @@ export interface Plan {
   breaks: number
   /** T-slot left open at the end (lines a T-spin there would clear), 0 if none */
   slotAfter: number
+  /** sealed holes the shown steps add (negative: they open some up) */
+  newSealed: number
   score: number
   /** the plan the player was already following */
   followed?: boolean
@@ -127,7 +132,10 @@ export const WEIGHTS = {
   b2bBreak: 30,
   /** plain line clear with no streak to lose: wasteful but harmless */
   plainClear: 2,
-  holes: 4,
+  /** a cell sealed off from the open area (unreachable without clearing lines above it) */
+  sealed: 8,
+  /** a covered gap that is still open to the side (overhang, tuck, slot): needed for spins, so cheap */
+  holes: 2,
   bumpiness: 0.35,
   height: 0.15,
   /** extra per row of max height above `dangerRow` */
@@ -146,19 +154,6 @@ const cellSetKey = (cells: readonly Cell[]) =>
     .join(',')
 
 // --- fast board features ------------------------------------------------------------------
-
-function heights(board: Board): number[] {
-  const h = new Array<number>(WIDTH).fill(0)
-  for (let x = 0; x < WIDTH; x++) {
-    for (let y = VISIBLE + 3; y >= 0; y--) {
-      if (board[y * WIDTH + x]) {
-        h[x] = y + 1
-        break
-      }
-    }
-  }
-  return h
-}
 
 function filled(board: Board, x: number, y: number) {
   if (x < 0 || x >= WIDTH || y < 0) return true
@@ -253,9 +248,12 @@ function tSlotCandidates(board: Board, h: number[]): Map<string, number> {
 }
 
 export interface BoardEval {
-  /** holes, not counting a confirmed slot's own cavity */
+  /** covered but still open gaps, not counting a confirmed slot's own cavity */
   holes: number
+  /** every empty cell under a block in its column */
   rawHoles: number
+  /** of those, cells sealed off from the open area */
+  sealed: number
   /** slot lines: optimistic (shape only) until `confirmed`, then reachability-checked */
   confirmed: boolean
   bumpiness: number
@@ -271,15 +269,19 @@ export function evaluateBoard(board: Board): BoardEval {
   let bump = 0
   for (let x = 0; x < WIDTH - 1; x++) bump += Math.abs(h[x] - h[x + 1])
   const height = h.reduce((a, b) => a + b, 0)
+  const sealed = holes ? sealedHoles(board, h) : 0
   // optimistic: the best shape-only candidate. confirmSlot() replaces it with the reachable value.
   let slot = 0
   for (const v of tSlotCandidates(board, h).values()) if (v > slot) slot = v
-  return withSlot({ holes, rawHoles: holes, confirmed: false, bumpiness: bump, height, maxHeight: Math.max(...h), slot }, slot)
+  return withSlot(
+    { holes, rawHoles: holes, sealed, confirmed: false, bumpiness: bump, height, maxHeight: Math.max(...h), slot },
+    slot,
+  )
 }
 
 function withSlot(e: BoardEval, slot: number): BoardEval {
-  // a T-slot's own cavity is not a "hole" worth penalising: it is the point
-  return { ...e, slot, holes: Math.max(0, e.rawHoles - (slot ? 1 : 0)) }
+  // a T-slot's own cavity is not a gap worth penalising: it is the point
+  return { ...e, slot, holes: Math.max(0, e.rawHoles - e.sealed - (slot ? 1 : 0)) }
 }
 
 /** Run the real reachability check for a node's slot (once) and re-score it. */
@@ -315,6 +317,8 @@ interface Node {
   score: number
   /** identifies the first placement (for diversity in the beam) */
   first: string
+  /** sealed holes on the starting board */
+  rootSealed: number
 }
 
 function tLeft(n: Node, queue: readonly PieceType[]): boolean {
@@ -327,7 +331,7 @@ function scoreNode(n: Node, queue: readonly PieceType[]): number {
   const w = WEIGHTS
   const e = n.eval
   let s = n.attack * w.attack + n.clearBonus - n.breaks * w.b2bBreak - n.plain * w.plainClear
-  s -= e.holes * w.holes + e.bumpiness * w.bumpiness + e.height * w.height
+  s -= e.sealed * w.sealed + e.holes * w.holes + e.bumpiness * w.bumpiness + e.height * w.height
   if (e.maxHeight > w.dangerRow) s -= (e.maxHeight - w.dangerRow) * w.danger
   if (e.slot) s += e.slot * (tLeft(n, queue) ? w.tSlot : w.tSlotNoT)
   return s
@@ -371,6 +375,7 @@ function apply(n: Node, c: Candidate, nextCurrent: PieceType | null, hold: Piece
     path: c.path,
     result: r,
     cells: c.cells.map(([x, y]): Cell => [x, n.rows[y]]),
+    sealed: 0,
   }
   const keeps = r.lines > 0 && r.difficult
   const child: Node = {
@@ -392,7 +397,9 @@ function apply(n: Node, c: Candidate, nextCurrent: PieceType | null, hold: Piece
     eval: evaluateBoard(c.board),
     score: 0,
     first: n.steps.length ? n.first : `${c.viaHold ? 'h' : ''}${cellSetKey(c.cells)}`,
+    rootSealed: n.rootSealed,
   }
+  step.sealed = child.eval.sealed
   child.score = scoreNode(child, queue)
   return child
 }
@@ -433,20 +440,27 @@ function expand(n: Node, queue: readonly PieceType[], spinRule: SpinRule, nonTSp
 }
 
 function describe(p: Omit<Plan, 'summary'>): string {
+  const seal = p.newSealed > 0 ? ` · seals ${p.newSealed} hole${p.newSealed > 1 ? 's' : ''}` : ''
+  return describeMain(p) + seal
+}
+
+function describeMain(p: Omit<Plan, 'summary'>): string {
+  // the piece sequence, e.g. "hold→L, T": tells plans apart at a glance
+  const seq = p.steps.map((s) => `${s.viaHold ? 'hold→' : ''}${s.type}`).join(', ')
   if (p.payoffs.length) {
     const parts = p.payoffs.map((i) => {
       const s = p.steps[i]
-      return `${s.result.label} +${s.result.attack} (${s.n})`
+      return `${s.result.label} +${s.result.attack}`
     })
     const last = p.steps[p.payoffs[p.payoffs.length - 1]].result
     const b2b = last.b2bChange === 'started' ? 'starts B2B' : `B2B ×${last.after.b2b}`
-    return `${parts.join(' → ')} · ${b2b}`
+    return `${parts.join(' → ')} · ${b2b} · ${seq}`
   }
-  if (p.slotAfter) return `Builds a ${['', 'TSS', 'TSD', 'TST'][p.slotAfter]} slot`
-  return 'Clean stacking'
+  if (p.slotAfter) return `Builds a ${['', 'TSS', 'TSD', 'TST'][p.slotAfter]} slot · ${seq}`
+  return `Clean stacking · ${seq}`
 }
 
-function toPlan(n: Node, followed = false): Plan {
+function toPlan(n: Node, followed = false, rootSealed = n.rootSealed): Plan {
   const payoffs: number[] = []
   n.steps.forEach((s, i) => {
     if (s.result.lines > 0 && s.result.difficult) payoffs.push(i)
@@ -463,9 +477,12 @@ function toPlan(n: Node, followed = false): Plan {
     breaks: n.breaks,
     // the slot after the SHOWN steps: only known when the plan isn't cut at a payoff
     slotAfter: payoffs.length ? 0 : n.eval.slot,
+    newSealed: 0,
     score: n.score,
     followed,
   }
+  const shown = base.steps[base.steps.length - 1]
+  base.newSealed = shown ? shown.sealed - rootSealed : 0
   return { ...base, summary: describe(base) }
 }
 
@@ -487,7 +504,9 @@ function rootNode(req: PlanRequest): Node {
     eval: evaluateBoard(req.board),
     score: 0,
     first: '',
+    rootSealed: 0,
   }
+  root.rootSealed = root.eval.sealed
   root.score = scoreNode(root, req.queue)
   confirmSlot(root, req.queue)
   return root
@@ -587,6 +606,13 @@ function pickPlans(beam: Node[], top: number, start: GameState | null, tally: { 
     firsts.add(k)
     out.push(p)
     if (out.length >= top) break
+  }
+  // same summary (same pieces, same payoff) but different spots: say so
+  const seen = new Map<string, number>()
+  for (const p of out) {
+    const n = (seen.get(p.summary) ?? 0) + 1
+    seen.set(p.summary, n)
+    if (n > 1) p.summary += ` (variant ${n})`
   }
   return out
 }

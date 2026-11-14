@@ -84,6 +84,8 @@ function Readout({ c, trainer }: { c: Candidate; trainer: Trainer }) {
           <dd>{r.after.combo >= 1 ? r.after.combo : '–'}</dd>
           <dt>Holes</dt>
           <dd>{c.newHoles > 0 ? `+${c.newHoles}` : c.newHoles}</dd>
+          <dt>Sealed</dt>
+          <dd className={c.newSealed > 0 ? 'bad' : undefined}>{c.newSealed > 0 ? `+${c.newSealed}` : c.newSealed}</dd>
           {c.makesSlot ? (
             <>
               <dt>Setup</dt>
