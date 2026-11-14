@@ -9,7 +9,7 @@ const ROWS: [string, string][] = [
   ['Ctrl+Z / ⌫', 'undo'],
   ['Ctrl+Y / Ctrl+Shift+Z', 'redo'],
   ['R', 'restart'],
-  ['P', 'spin plan on/off'],
+  ['P', 'find a spin setup from here / stop'],
   ['F', 'all-placements overlay on/off'],
   ['Tab / Shift+Tab', 'next / previous plan (or placement)'],
 ]

@@ -49,7 +49,7 @@ export class PlanOverlay implements Overlay {
 
   draw(ctx: CanvasRenderingContext2D, view: BoardView) {
     const pl = this.planner
-    const plan = pl.settings.enabled ? pl.plan : null
+    const plan = pl.plan
     if (!plan) return
     ctx.save()
     ctx.lineJoin = 'round'

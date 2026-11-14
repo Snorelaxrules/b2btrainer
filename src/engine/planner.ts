@@ -11,10 +11,11 @@
  */
 import type { SpinRule } from '../config/scoring'
 import { type Candidate, findPlacements } from './finder'
-import { type ActivePiece, type Board, type Cell, HEIGHT, VISIBLE, WIDTH } from './game'
+import { type ActivePiece, type Board, type Cell, type GameState, HEIGHT, VISIBLE, WIDTH, newGame, spawnPiece } from './game'
 import type { Move } from './movegen'
 import { type PieceType, SHAPES } from './pieces'
 import type { ClearResult, Counters } from './scoring'
+import { verifyPlan } from './verify'
 
 export interface PlanRequest {
   board: Board
@@ -29,8 +30,6 @@ export interface PlanRequest {
   /** nodes kept per depth */
   beam: number
   spinRule: SpinRule
-  /** a plan the player is following: its remaining steps, to score and keep stable */
-  follow?: readonly FollowStep[]
 }
 
 export interface FollowStep {
@@ -73,6 +72,31 @@ export interface PlanProgress {
   plans: Plan[]
   nodes: number
   ms: number
+  /** candidate plans rejected by engine verification so far in this search */
+  discarded: number
+}
+
+export interface SearchOptions {
+  /** replay every plan through the real engine before returning it (default true) */
+  verify?: boolean
+}
+
+/**
+ * A real game state equal to the request: the position the plan must be playable from.
+ * Pieces beyond `req.queue` are filled by the engine from an arbitrary bag; a plan
+ * that touched them would fail verification on piece type, so it can't rely on them.
+ */
+export function stateFromRequest(req: PlanRequest): GameState {
+  const g = newGame({ seed: 1, rules: { spinRule: req.spinRule, gravity: 'none' } })
+  return {
+    ...g,
+    board: req.board,
+    counters: req.counters,
+    active: spawnPiece(req.current),
+    hold: req.hold,
+    holdUsed: req.holdUsed,
+    queue: [...req.queue],
+  }
 }
 
 // --- weights ------------------------------------------------------------------------
@@ -430,16 +454,20 @@ export function replayPlan(req: PlanRequest, follow: readonly FollowStep[]): Pla
  * Beam search. Calls `onProgress` after each depth with the best plans so far.
  * Returns the final top plans (distinct first moves).
  */
-export function searchPlans(req: PlanRequest, onProgress?: (p: PlanProgress) => void, top = 3): Plan[] {
+export function searchPlans(
+  req: PlanRequest,
+  onProgress?: (p: PlanProgress) => void,
+  top = 3,
+  opts: SearchOptions = {},
+): Plan[] {
   const t0 = performance.now()
+  const verify = opts.verify !== false
+  const start = verify ? stateFromRequest(req) : null
   let beam: Node[] = [rootNode(req)]
   let nodes = 0
   let plans: Plan[] = []
+  const tally = { discarded: 0 }
   const depth = Math.max(1, Math.min(6, req.depth))
-  // a plan the player is following is scored first and shown straight away
-  const followed = req.follow?.length ? replay(req, req.follow) : null
-  const fp = followed ? toPlan(followed, true) : null
-  if (fp) onProgress?.({ depthDone: 0, plans: [fp], nodes: 0, ms: performance.now() - t0 })
   for (let d = 1; d <= depth; d++) {
     const children: Node[] = []
     for (const n of beam) {
@@ -465,22 +493,14 @@ export function searchPlans(req: PlanRequest, onProgress?: (p: PlanProgress) => 
       beam.push(c)
       if (beam.length >= req.beam) break
     }
-    plans = pickPlans(beam, top)
-    onProgress?.({ depthDone: d, plans, nodes, ms: performance.now() - t0 })
-  }
-  // keep following unless something clearly better turned up
-  if (fp && (!plans[0] || fp.score >= plans[0].score - 3)) {
-    plans = [fp, ...plans.filter((p) => !samePlan(p, fp))].slice(0, top)
+    plans = pickPlans(beam, top, start, tally)
+    onProgress?.({ depthDone: d, plans, nodes, ms: performance.now() - t0, discarded: tally.discarded })
   }
   return plans
 }
 
-function samePlan(a: Plan, b: Plan) {
-  const s = (p: Plan) => p.steps.map((x) => `${x.viaHold ? 'h' : ''}${x.cells.join(';')}`).join('|')
-  return s(a) === s(b)
-}
-
-function pickPlans(beam: Node[], top: number): Plan[] {
+/** Best plans with distinct first moves; with `start`, only plans the engine reproduces. */
+function pickPlans(beam: Node[], top: number, start: GameState | null, tally: { discarded: number }): Plan[] {
   const out: Plan[] = []
   const firsts = new Set<string>()
   for (const n of beam) {
@@ -488,6 +508,10 @@ function pickPlans(beam: Node[], top: number): Plan[] {
     const f = p.steps[0]
     const k = f ? `${f.viaHold}|${f.cells.join(';')}` : ''
     if (firsts.has(k)) continue
+    if (start && !verifyPlan(start, p).ok) {
+      tally.discarded++
+      continue
+    }
     firsts.add(k)
     out.push(p)
     if (out.length >= top) break

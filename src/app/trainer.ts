@@ -39,7 +39,7 @@ function loadSettings(): TrainerSettings {
     gravity: DEFAULT_RULES.gravity,
     spinRule: DEFAULT_RULES.spinRule,
     finder: { enabled: false, showOther: false, includeHold: false },
-    planner: { enabled: true, depth: 5, beam: 100 },
+    planner: { depth: 5, beam: 100 },
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -54,7 +54,10 @@ function loadSettings(): TrainerSettings {
       seed: saved.lockSeed && typeof saved.seed === 'number' ? saved.seed : base.seed,
       // the per-piece finder overlay became secondary when the planner arrived: off unless chosen since
       finder: saved.planner && typeof saved.finder === 'object' ? { ...base.finder, ...saved.finder } : base.finder,
-      planner: { ...base.planner, ...(typeof saved.planner === 'object' ? saved.planner : {}) },
+      planner: {
+        depth: typeof saved.planner?.depth === 'number' ? saved.planner.depth : base.planner.depth,
+        beam: typeof saved.planner?.beam === 'number' ? saved.planner.beam : base.planner.beam,
+      },
     }
   } catch {
     return base
@@ -94,16 +97,17 @@ export class Trainer {
       const rule = this.settings.spinRule
       if (e === 'place') this.planner.onPlace(this.seen, s, rule)
       else if (e === 'hold') this.planner.onHold(s, rule)
-      else if (e === 'undo' || e === 'redo' || e === 'revert') this.planner.onRestore(s, rule)
-      else if (e !== 'over') this.planner.search(s, rule)
+      else if (e === 'undo' || e === 'redo' || e === 'revert') this.planner.onRestore(s)
+      else if (e === 'restart' || e === 'over') this.planner.off('')
+      else if (e === 'rules' && this.planner.active) this.planner.search(s, rule)
       this.seen = s
       this.bump()
     })
   }
 
-  /** Drop the current (possibly locked) plan and search again. */
+  /** Drop the current (possibly locked) plan and analyse the position again. */
   replan() {
-    this.planner.replan(this.session.state, this.settings.spinRule)
+    this.planner.search(this.session.state, this.settings.spinRule)
   }
 
   setPlanner(patch: Partial<PlannerSettings>) {
@@ -169,7 +173,7 @@ export class Trainer {
     this.shiftHold = null
     if (action === 'restart') return this.restart(!this.settings.lockSeed)
     if (action === 'toggleFinder') return this.setFinder({ enabled: !this.finder.toggles.enabled })
-    if (action === 'togglePlan') return this.setPlanner({ enabled: !this.planner.settings.enabled })
+    if (action === 'togglePlan') return this.planner.toggle(this.session.state, this.settings.spinRule)
     if (this.startedAt === null && !this.session.state.over) this.startedAt = t
     const before = this.session.state
     this.input.press(action, t, this.session)
@@ -183,7 +187,7 @@ export class Trainer {
     const sh = this.shiftHold
     this.shiftHold = null
     if (dir < 0 && sh && this.session.state === sh.after) this.session.revert(sh.before)
-    if (this.planner.settings.enabled && this.planner.plans.length) this.planner.cycle(dir)
+    if (this.planner.active && this.planner.plans.length) this.planner.cycle(dir)
     else this.finder.cycle(dir)
   }
 
@@ -195,7 +199,6 @@ export class Trainer {
     const ro = new ResizeObserver(fit)
     ro.observe(container)
 
-    this.planner.search(this.session.state, this.settings.spinRule)
     const unbind = bindKeyboard(window, {
       press: (a, t, code) => this.press(a, t, code),
       cycle: (dir) => this.cycle(dir),
