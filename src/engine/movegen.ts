@@ -38,9 +38,11 @@ export interface Reachable {
 }
 
 const X_OFF = 4
+/** rk: -1 = shifted/dropped, 0–5 = kick index of a 90° rotation, 6–11 = of a 180 */
 function key(x: number, y: number, rot: number, rk: number) {
-  return (((rot * 32 + (x + X_OFF)) * 64 + y) * 8) + (rk + 1)
+  return ((rot * 32 + (x + X_OFF)) * 64 + y) * 16 + (rk + 1)
 }
+const rkOf = (p: ActivePiece) => (p.rotated ? p.kick + (p.flip ? 6 : 0) : -1)
 
 interface Node {
   p: ActivePiece
@@ -53,12 +55,12 @@ export function reachablePlacements(board: Board, type: PieceType, start?: Activ
   const s0 = start ?? spawnPiece(type)
   if (!fits(board, s0)) return []
   const nodes = new Map<number, Node>()
-  const k0 = key(s0.x, s0.y, s0.rot, s0.rotated ? s0.kick : -1)
+  const k0 = key(s0.x, s0.y, s0.rot, rkOf(s0))
   nodes.set(k0, { p: s0, prev: -1, move: null })
   const queue: number[] = [k0]
 
   const visit = (from: number, p: ActivePiece, move: Move) => {
-    const k = key(p.x, p.y, p.rot, p.rotated ? p.kick : -1)
+    const k = key(p.x, p.y, p.rot, rkOf(p))
     if (nodes.has(k)) return
     nodes.set(k, { p, prev: from, move })
     queue.push(k)

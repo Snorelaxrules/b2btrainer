@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import * as G from './game'
 import { findPlacements } from './finder'
-import { type PlanRequest, replayPlan, searchPlans } from './planner'
+import { type PlanRequest, replayPlan, searchPlans, tSlotLines } from './planner'
 import { verifyPlan } from './verify'
 
 function rng(seed: number) {
@@ -32,12 +32,14 @@ it('every plan the planner returns replays exactly in the real engine', { timeou
   const failures: string[] = []
   let total = 0
   for (let seed = 1; seed <= 40; seed++) {
-    const s = randomState(seed, 6 + (seed % 9))
-    if (s.over || !s.active) continue
+    const s0 = randomState(seed, 6 + (seed % 9))
+    if (s0.over || !s0.active) continue
+    // an active streak, so B2B-breaking placements exist and must be pruned
+    const s = { ...s0, counters: { b2b: 1 + (seed % 5), combo: -1 } }
     const req: PlanRequest = {
       board: s.board,
       counters: s.counters,
-      current: s.active.type,
+      current: s0.active.type,
       hold: s.hold,
       holdUsed: s.holdUsed,
       queue: s.queue.slice(0, 5),
@@ -48,6 +50,18 @@ it('every plan the planner returns replays exactly in the real engine', { timeou
     const plans = searchPlans(req, undefined, 3, { verify: false })
     for (const p of plans) {
       total++
+      if (p.steps.some((st) => st.result.b2bChange === 'broken')) failures.push(`seed ${seed}: ${p.summary} breaks B2B`)
+      if (p.steps.some((st) => st.result.lines > 0 && st.result.spin !== 'none' && st.type !== 'T'))
+        failures.push(`seed ${seed}: ${p.summary} clears with a non-T spin while those are off`)
+      if (p.slotAfter) {
+        // the slot the plan claims to leave must be reachable by a real T, as a full spin
+        let after = s
+        for (const st of p.steps) {
+          if (st.viaHold) after = G.hold(after)
+          after = G.lockPiece(after, st.piece)
+        }
+        if (tSlotLines(after.board) !== p.slotAfter) failures.push(`seed ${seed}: ${p.summary} claims an unreachable slot`)
+      }
       const v = verifyPlan(s, p)
       if (!v.ok) failures.push(`seed ${seed}: ${p.summary} — step ${v.step}: ${v.reason}`)
     }

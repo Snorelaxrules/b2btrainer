@@ -59,4 +59,21 @@ describe('planner', () => {
     expect(plans[0].breaks).toBe(0)
     console.info(`empty-board plan: ${plans[0].summary} | ${plans[0].steps.map((s) => `${s.type}${s.viaHold ? '(h)' : ''}:${s.result.label || '-'}`).join(' ')}`)
   })
+
+  it('never suggests breaking B2B, even when the easy move is a plain double', () => {
+    // two rows open only in the right column: an I there is a double that breaks B2B ×3
+    const plans = searchPlans({
+      board: boardFromRows(['#########.', '#########.']),
+      counters: { b2b: 3, combo: -1 },
+      current: 'I',
+      hold: null,
+      holdUsed: false,
+      queue: ['O', 'L', 'J', 'S', 'Z'],
+      depth: 5,
+      beam: 60,
+      spinRule: 'allmini+',
+    })
+    expect(plans.length).toBeGreaterThan(0)
+    for (const p of plans) for (const st of p.steps) expect(st.result.b2bChange).not.toBe('broken')
+  })
 })

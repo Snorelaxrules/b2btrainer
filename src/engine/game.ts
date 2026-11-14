@@ -38,6 +38,8 @@ export interface ActivePiece extends Piece {
   readonly rotated: boolean
   /** index of the kick test used by that rotation (0 = no kick), -1 if none */
   readonly kick: number
+  /** that rotation was a 180 (its kick table is different: see detectSpin) */
+  readonly flip?: boolean
 }
 
 /** Lock-delay bookkeeping for the current piece (gravity 'normal' only). */
@@ -347,7 +349,7 @@ export function rotatePiece(board: Board, p: Piece, turn: 1 | -1 | 2): ActivePie
   for (let i = 0; i < tests.length; i++) {
     const [dx, dy] = tests[i]
     const c = { type: p.type, rot: to, x: p.x + dx, y: p.y + dy }
-    if (fits(board, c)) return { ...c, rotated: true, kick: i }
+    if (fits(board, c)) return { ...c, rotated: true, kick: i, flip: turn === 2 }
   }
   return null
 }

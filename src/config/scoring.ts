@@ -52,8 +52,8 @@ export const SCORING = {
   /** O-piece "spins" count under all-spin rules. TETR.IO behaviour unverified; off by default. */
   oSpins: false,
   /**
-   * The 5th kick test (index 4) upgrades a T-spin Mini to a full T-spin (TST / fin kicks).
-   * Applied to every rotation direction including 180.
+   * The 5th kick test (index 4) of a 90° rotation upgrades a T-spin Mini to a full T-spin
+   * (TST / fin kicks). Not applied to 180s, whose 5th test is a sideways nudge, not a TST kick.
    */
   fifthKickUpgrades: true,
 
@@ -90,7 +90,7 @@ export const SCORING = {
 
   /** Season 2 Tetra League: 5 (Season 1: 10, Quick Play: 3). Added flat after the combo multiplier. */
   allClearAttack: 5,
-  /** B2B levels an All Clear adds, regardless of clear type (Mechanics page; TETRA LEAGUE page says 1). */
+  /** B2B levels an All Clear adds, regardless of clear type (Mechanics page; confirmed by the user). */
   allClearB2B: 2,
 
   /** 'down' = floor (Tetra League, ZEN, custom). Quick Play's weighted-RNG rounding is not modelled. */

@@ -25,6 +25,8 @@ export interface PlannerSettings {
   depth: number
   /** beam width */
   beam: number
+  /** allow plans that clear with non-T (mini) spins */
+  nonTSpins: boolean
 }
 
 export const BEAM_PRESETS = [
@@ -101,6 +103,7 @@ export class PlannerController {
       depth: this.settings.depth,
       beam: this.settings.beam,
       spinRule,
+      nonTSpins: this.settings.nonTSpins,
     }
   }
 

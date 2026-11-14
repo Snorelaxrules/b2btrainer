@@ -38,6 +38,10 @@ describe('T-spin detection (3-corner rule)', () => {
     expect(detectSpin(MINI_BOARD, T(2, 3, 2, 4), 'tspin')).toBe('full')
   })
 
+  it('a 180 whose 5th test was used stays a mini (only 90° TST/fin kicks upgrade)', () => {
+    expect(detectSpin(MINI_BOARD, { ...T(2, 3, 2, 4), flip: true }, 'tspin')).toBe('mini')
+  })
+
   it('not a spin when the last action was not a rotation', () => {
     expect(detectSpin(TSD_BOARD, { ...T(2, 3, 2), rotated: false }, 'tspin')).toBe('none')
   })

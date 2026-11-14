@@ -131,6 +131,18 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
         )}
       </div>
 
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={st.nonTSpins}
+          onChange={(e) => {
+            trainer.setPlanner({ nonTSpins: e.target.checked })
+            blur(e)
+          }}
+        />
+        <span>Allow non-T mini spins (odd overhangs)</span>
+      </label>
+
       {pl.note && <p className="plan-note">{pl.note}</p>}
 
       {!pl.active && !pl.note && (

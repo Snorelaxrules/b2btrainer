@@ -77,7 +77,8 @@ export function detectSpin(board: Board, p: ActivePiece, rule: SpinRule, cfg: Sc
     if (count >= 3) {
       const [a, b] = T_FRONT[p.rot]
       if (filled[a] && filled[b]) return 'full'
-      if (cfg.fifthKickUpgrades && p.kick === 4) return 'full'
+      // TST / fin kick: the 5th test of a 90° rotation. (A 180's 5th test is a plain sideways nudge.)
+      if (cfg.fifthKickUpgrades && p.kick === 4 && !p.flip) return 'full'
       return 'mini'
     }
     if (rule === 'allmini+' && immobile(board, p)) return 'mini'

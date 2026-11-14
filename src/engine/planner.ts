@@ -11,10 +11,21 @@
  */
 import type { SpinRule } from '../config/scoring'
 import { type Candidate, findPlacements } from './finder'
-import { type ActivePiece, type Board, type Cell, type GameState, HEIGHT, VISIBLE, WIDTH, newGame, spawnPiece } from './game'
-import type { Move } from './movegen'
+import {
+  type ActivePiece,
+  type Board,
+  type Cell,
+  type GameState,
+  HEIGHT,
+  VISIBLE,
+  WIDTH,
+  newGame,
+  pieceCells,
+  spawnPiece,
+} from './game'
+import { type Move, reachablePlacements } from './movegen'
 import { type PieceType, SHAPES } from './pieces'
-import type { ClearResult, Counters } from './scoring'
+import { type ClearResult, type Counters, detectSpin } from './scoring'
 import { verifyPlan } from './verify'
 
 export interface PlanRequest {
@@ -30,6 +41,11 @@ export interface PlanRequest {
   /** nodes kept per depth */
   beam: number
   spinRule: SpinRule
+  /**
+   * Plan line clears with non-T spins (All-Mini+ / all-spin). Off by default: those
+   * setups need odd overhangs; with it off, plans keep B2B with T-spins and quads only.
+   */
+  nonTSpins?: boolean
 }
 
 export interface FollowStep {
@@ -103,8 +119,11 @@ export function stateFromRequest(req: PlanRequest): GameState {
 
 export const WEIGHTS = {
   attack: 2,
-  b2bClear: 6,
-  /** breaking an active streak (and any plain clear while a streak is alive) */
+  /** B2B-keeping clears: real T-spins are what we're training, minis only keep the chain alive */
+  fullSpinClear: 8,
+  quadClear: 6,
+  miniSpinClear: 2,
+  /** unused while breaks are pruned outright (see expand); kept for experiments */
   b2bBreak: 30,
   /** plain line clear with no streak to lose: wasteful but harmless */
   plainClear: 2,
@@ -157,11 +176,28 @@ const T_CORNERS: [number, number][] = [
 
 /**
  * Lines a full T-spin would clear in the best open T-slot (0 if none).
- * Only looks near the surface; requires 3 corners, both facing corners, a roof
- * over at least one cell, and the T resting there.
+ *
+ * Two passes. A cheap shape check near the surface finds candidate spots (3
+ * corners, both facing corners, a roof over at least one cell, T resting, ≥1
+ * line). Then a real move search (SRS+ kicks from spawn) confirms a T can
+ * actually rotate into one of them and score a FULL spin. Without the second
+ * pass the planner chased "slots" no T could ever reach.
  */
 export function tSlotLines(board: Board, h: number[] = heights(board)): number {
+  const cands = tSlotCandidates(board, h)
+  if (!cands.size) return 0
   let best = 0
+  for (const r of reachablePlacements(board, 'T')) {
+    if (!r.piece.rotated) continue
+    const lines = cands.get(cellSetKey(pieceCells(r.piece)))
+    if (lines && lines > best && detectSpin(board, r.piece, 'tspin') === 'full') best = lines
+  }
+  return best
+}
+
+/** Shape-only T-slot candidates: covered-cells key → lines a T-spin there would clear. */
+function tSlotCandidates(board: Board, h: number[]): Map<string, number> {
+  const found = new Map<string, number>()
   for (let rot = 1; rot <= 3; rot++) {
     const cells = SHAPES.T[rot]
     for (let bx = -1; bx < WIDTH - 1; bx++) {
@@ -209,15 +245,19 @@ export function tSlotLines(board: Board, h: number[] = heights(board)): number {
           }
           if (full) lines++
         }
-        if (lines > best) best = lines
+        if (lines) found.set(cellSetKey(cells.map(([cx, cy]): Cell => [bx + cx, by - cy])), lines)
       }
     }
   }
-  return best
+  return found
 }
 
 export interface BoardEval {
+  /** holes, not counting a confirmed slot's own cavity */
   holes: number
+  rawHoles: number
+  /** slot lines: optimistic (shape only) until `confirmed`, then reachability-checked */
+  confirmed: boolean
   bumpiness: number
   height: number
   maxHeight: number
@@ -231,9 +271,23 @@ export function evaluateBoard(board: Board): BoardEval {
   let bump = 0
   for (let x = 0; x < WIDTH - 1; x++) bump += Math.abs(h[x] - h[x + 1])
   const height = h.reduce((a, b) => a + b, 0)
-  const slot = tSlotLines(board, h)
+  // optimistic: the best shape-only candidate. confirmSlot() replaces it with the reachable value.
+  let slot = 0
+  for (const v of tSlotCandidates(board, h).values()) if (v > slot) slot = v
+  return withSlot({ holes, rawHoles: holes, confirmed: false, bumpiness: bump, height, maxHeight: Math.max(...h), slot }, slot)
+}
+
+function withSlot(e: BoardEval, slot: number): BoardEval {
   // a T-slot's own cavity is not a "hole" worth penalising: it is the point
-  return { holes: Math.max(0, holes - (slot ? 1 : 0)), bumpiness: bump, height, maxHeight: Math.max(...h), slot }
+  return { ...e, slot, holes: Math.max(0, e.rawHoles - (slot ? 1 : 0)) }
+}
+
+/** Run the real reachability check for a node's slot (once) and re-score it. */
+function confirmSlot(n: Node, queue: readonly PieceType[]) {
+  if (n.eval.confirmed) return
+  const slot = n.eval.slot ? tSlotLines(n.board) : 0
+  n.eval = { ...withSlot(n.eval, slot), confirmed: true }
+  n.score = scoreNode(n, queue)
 }
 
 // --- search ----------------------------------------------------------------------------------
@@ -255,6 +309,8 @@ interface Node {
   b2bClears: number
   breaks: number
   plain: number
+  /** sum of the per-kind B2B clear bonuses (full spin > quad > mini) */
+  clearBonus: number
   eval: BoardEval
   score: number
   /** identifies the first placement (for diversity in the beam) */
@@ -270,7 +326,7 @@ function tLeft(n: Node, queue: readonly PieceType[]): boolean {
 function scoreNode(n: Node, queue: readonly PieceType[]): number {
   const w = WEIGHTS
   const e = n.eval
-  let s = n.attack * w.attack + n.b2bClears * w.b2bClear - n.breaks * w.b2bBreak - n.plain * w.plainClear
+  let s = n.attack * w.attack + n.clearBonus - n.breaks * w.b2bBreak - n.plain * w.plainClear
   s -= e.holes * w.holes + e.bumpiness * w.bumpiness + e.height * w.height
   if (e.maxHeight > w.dangerRow) s -= (e.maxHeight - w.dangerRow) * w.danger
   if (e.slot) s += e.slot * (tLeft(n, queue) ? w.tSlot : w.tSlotNoT)
@@ -328,6 +384,9 @@ function apply(n: Node, c: Candidate, nextCurrent: PieceType | null, hold: Piece
     rows,
     attack: n.attack + r.attack,
     b2bClears: n.b2bClears + (keeps ? 1 : 0),
+    clearBonus:
+      n.clearBonus +
+      (keeps ? (r.spin === 'full' ? WEIGHTS.fullSpinClear : r.spin === 'mini' ? WEIGHTS.miniSpinClear : WEIGHTS.quadClear) : 0),
     breaks: n.breaks + (r.b2bChange === 'broken' ? 1 : 0),
     plain: n.plain + (r.lines > 0 && !r.difficult && r.b2bChange !== 'broken' ? 1 : 0),
     eval: evaluateBoard(c.board),
@@ -360,10 +419,13 @@ function transitions(n: Node, queue: readonly PieceType[]): Transition[] {
   return out
 }
 
-function expand(n: Node, queue: readonly PieceType[], spinRule: SpinRule): Node[] {
+function expand(n: Node, queue: readonly PieceType[], spinRule: SpinRule, nonTSpins = false): Node[] {
   const out: Node[] = []
   for (const t of transitions(n, queue)) {
     for (const c of findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule })) {
+      // never suggest breaking back-to-back: such placements are not part of any plan
+      if (c.result.b2bChange === 'broken') continue
+      if (!nonTSpins && c.result.lines > 0 && c.result.spin !== 'none' && c.piece.type !== 'T') continue
       out.push(apply(n, c, t.nextCurrent, t.hold, t.next, queue))
     }
   }
@@ -399,7 +461,8 @@ function toPlan(n: Node, followed = false): Plan {
     attack: n.attack,
     b2bClears: n.b2bClears,
     breaks: n.breaks,
-    slotAfter: n.eval.slot,
+    // the slot after the SHOWN steps: only known when the plan isn't cut at a payoff
+    slotAfter: payoffs.length ? 0 : n.eval.slot,
     score: n.score,
     followed,
   }
@@ -420,11 +483,13 @@ function rootNode(req: PlanRequest): Node {
     b2bClears: 0,
     breaks: 0,
     plain: 0,
+    clearBonus: 0,
     eval: evaluateBoard(req.board),
     score: 0,
     first: '',
   }
   root.score = scoreNode(root, req.queue)
+  confirmSlot(root, req.queue)
   return root
 }
 
@@ -471,12 +536,18 @@ export function searchPlans(
   for (let d = 1; d <= depth; d++) {
     const children: Node[] = []
     for (const n of beam) {
-      const kids = expand(n, req.queue, req.spinRule)
+      const kids = expand(n, req.queue, req.spinRule, req.nonTSpins)
       nodes += kids.length
       children.push(...kids)
     }
     if (!children.length) break
+    // stage 1: rank by the optimistic score (cheap slot shape check)
     children.sort((a, b) => b.score - a.score)
+    // stage 2: confirm slots by real move search for the front-runners only, then re-rank
+    const front = children.slice(0, Math.max(req.beam * 2, 40))
+    for (const c of front) confirmSlot(c, req.queue)
+    front.sort((a, b) => b.score - a.score)
+    children.splice(0, front.length, ...front)
     // keep the best nodes, but no first move may take more than a third of the
     // beam, so alternative plans survive to the end
     const seen = new Set<string>()
@@ -490,6 +561,7 @@ export function searchPlans(
       if (used >= cap) continue
       seen.add(k)
       perFirst.set(c.first, used + 1)
+      confirmSlot(c, req.queue) // no unconfirmed slot ever reaches a plan
       beam.push(c)
       if (beam.length >= req.beam) break
     }
