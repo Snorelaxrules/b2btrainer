@@ -16,7 +16,8 @@
  */
 import type { SpinRule } from '../config/scoring'
 import { type GameState, pieceCells } from '../engine/game'
-import { type MiniSpinMode, type Plan, type PlanRequest, replayPlan } from '../engine/planner'
+import { type MiniSpinMode, type Plan, type PlanRequest, type Target, completePlan } from '../engine/planner'
+import { type Board, type Cell, HEIGHT, WIDTH } from '../engine/game'
 import { verifyPlan } from '../engine/verify'
 import type { WorkerIn, WorkerOut } from '../search/planner.worker'
 
@@ -128,14 +129,14 @@ export class PlannerController {
   }
 
   /**
-   * Lock onto `plan` with its remaining `steps`, re-scored and verified on the
-   * live state `s`. Returns false if the rest is no longer playable.
+   * Lock onto a setup: finish `targets` (piece + cells, in the coordinates of
+   * `s`) in whatever order the remaining pieces allow, verified on the live
+   * state. Returns false if no order works any more.
    */
-  private lock(s: GameState, spinRule: SpinRule, steps: Plan['steps'], firstViaHold?: boolean): boolean {
+  private lock(s: GameState, spinRule: SpinRule, targets: Target[]): boolean {
     const req = this.requestFor(s, spinRule)
     if (!req) return false
-    const follow = steps.map((st, i) => ({ piece: st.piece, viaHold: i === 0 && firstViaHold !== undefined ? firstViaHold : st.viaHold }))
-    const next = replayPlan(req, follow)
+    const next = completePlan(req, targets)
     if (!next || !verifyPlan(s, next).ok) {
       if (next) this.discardedTotal++
       return false
@@ -150,41 +151,51 @@ export class PlannerController {
     return true
   }
 
-  /** A piece locked. */
+  /** Shown plans to match a move against: the locked one, else the selected one first. */
+  private candidatePlans(): Plan[] {
+    if (this.following) return this.plans.slice(0, 1)
+    const sel = this.plans[this.selected]
+    return sel ? [sel, ...this.plans.filter((p) => p !== sel)] : this.plans
+  }
+
+  /**
+   * A piece locked. If it went exactly where ANY step of a shown plan puts that
+   * piece (in order or not), keep the setup: the remaining steps are re-ordered
+   * to fit the pieces left. Otherwise the player has left the plan.
+   */
   onPlace(before: GameState, after: GameState, spinRule: SpinRule) {
     if (!this.active) return
     const placed = after.last?.piece
-    const fresh = after.stats.pieces === before.stats.pieces + 1
-    // which shown plan (if any) did the player just play step 1 of?
-    const candidates = this.following ? this.plans.slice(0, 1) : this.plans
-    const hit =
-      fresh && placed
-        ? candidates.find((p) => p.steps[0]?.type === placed.type && cellsKey(p.steps[0].cells) === cellsKey(pieceCells(placed)))
-        : undefined
-    if (!hit) {
-      this.off(this.following ? 'Left the plan. Press P for a new one.' : '')
+    if (!placed || after.stats.pieces !== before.stats.pieces + 1) return
+    const cells = pieceCells(placed)
+    const key = cellsKey(cells)
+    for (const plan of this.candidatePlans()) {
+      const i = plan.steps.findIndex((st) => st.type === placed.type && cellsKey(st.cells) === key)
+      if (i < 0) continue
+      const rest = remapAfterClear(
+        before.board,
+        cells,
+        plan.steps.filter((_, j) => j !== i).map((st) => ({ type: st.type, cells: st.cells })),
+      )
+      if (rest && !rest.length) {
+        const pay = plan.steps[plan.payoff]
+        this.off(pay ? `Plan complete: ${pay.result.label} +${pay.result.attack}. Press P for the next one.` : 'Plan complete.')
+        return
+      }
+      if (rest && this.lock(after, spinRule, rest)) return
+      this.off("The pieces left can't finish this setup any more. Press P to replan.")
       return
     }
-    const rest = hit.steps.slice(1)
-    if (!rest.length) {
-      const pay = hit.steps[hit.payoff]
-      this.off(pay ? `Plan complete: ${pay.result.label} +${pay.result.attack}. Press P for the next one.` : 'Plan complete.')
-      return
-    }
-    if (!this.lock(after, spinRule, rest)) this.off('The rest of the plan is no longer possible. Press P to replan.')
+    this.off(this.following ? 'Left the plan. Press P for a new one.' : '')
   }
 
-  /** The player held. Committing to a plan whose step 1 is a hold locks it; otherwise this leaves the plan. */
+  /** The player held: keep the setup if the remaining pieces can still finish it. */
   onHold(s: GameState, spinRule: SpinRule) {
     if (!this.active) return
-    const candidates = this.following ? this.plans.slice(0, 1) : this.plans
-    const idx = candidates.findIndex((p) => p.steps[0]?.viaHold && p.steps[0].type === s.active?.type)
-    if (idx < 0) {
-      this.off(this.following ? 'Left the plan. Press P for a new one.' : '')
-      return
+    for (const plan of this.candidatePlans()) {
+      if (this.lock(s, spinRule, plan.steps.map((st) => ({ type: st.type, cells: st.cells })))) return
     }
-    // the held piece is now in hand: step 1 no longer needs (or allows) a hold key
-    if (!this.lock(s, spinRule, candidates[idx].steps, false)) this.off('The plan is no longer possible. Press P to replan.')
+    this.off(this.following ? "The pieces left can't finish this setup. Press P to replan." : '')
   }
 
   /** Undo / redo / Shift+Tab: restore the planner as it was at that position. */
@@ -297,3 +308,25 @@ export class PlannerController {
     this.running = false
   }
 }
+
+/**
+ * Targets after a lock of `cells` on `board`: rows that lock clears are gone,
+ * cells above them move down. Null if a target needed a row that was cleared.
+ */
+export function remapAfterClear(board: Board, cells: readonly Cell[], targets: Target[]): Target[] | null {
+  const filled = (x: number, y: number) => board[y * WIDTH + x] !== 0 || cells.some(([cx, cy]) => cx === x && cy === y)
+  const cleared: number[] = []
+  for (let y = 0; y < HEIGHT; y++) {
+    let full = true
+    for (let x = 0; x < WIDTH && full; x++) if (!filled(x, y)) full = false
+    if (full) cleared.push(y)
+  }
+  if (!cleared.length) return targets
+  const out: Target[] = []
+  for (const t of targets) {
+    if (t.cells.some(([, y]) => cleared.includes(y))) return null
+    out.push({ type: t.type, cells: t.cells.map(([x, y]): Cell => [x, y - cleared.filter((r) => r < y).length]) })
+  }
+  return out
+}
+

@@ -69,8 +69,11 @@ export interface Pockets {
   spinOnly: number
   /** covered cells open to the air that no piece can ever reach */
   dead: number
-  /** for spin-only cells (with `detail`): which pieces can spin into them */
-  spinFillers?: Set<string>
+  /**
+   * With `detail`: every awkward cell (index y*WIDTH+x) → 'sealed' (cut off from the
+   * open area), 'dead' (open but unreachable) or the pieces that can only spin into it.
+   */
+  awkward?: Map<number, string[] | 'sealed' | 'dead'>
 }
 
 /**
@@ -81,6 +84,14 @@ export interface Pockets {
  */
 export function classifyPockets(board: Board, h: number[] = heights(board), detail = false): Pockets {
   const seen = floodOpen(board, h)
+  const awkward = detail ? new Map<number, string[] | 'sealed' | 'dead'>() : undefined
+  if (awkward) {
+    for (let x = 0; x < WIDTH; x++)
+      for (let y = 0; y < h[x]; y++) {
+        const i = y * WIDTH + x
+        if (!board[i] && !seen[i]) awkward.set(i, 'sealed')
+      }
+  }
   const cls = new Map<number, number>() // cell → 0 unreached, 1 spin only, 2 tuck
   for (let x = 0; x < WIDTH; x++) {
     for (let y = 0; y < h[x]; y++) {
@@ -88,7 +99,7 @@ export function classifyPockets(board: Board, h: number[] = heights(board), deta
       if (!board[i] && seen[i]) cls.set(i, 0)
     }
   }
-  if (!cls.size) return { tuck: 0, spinOnly: 0, dead: 0 }
+  if (!cls.size) return { tuck: 0, spinOnly: 0, dead: 0, awkward }
   let open = cls.size // cells not yet known to be tuck-fillable
   const fillers = new Map<number, Set<string>>()
   const cells = new Int8Array(8)
@@ -135,15 +146,17 @@ export function classifyPockets(board: Board, h: number[] = heights(board), deta
   let tuck = 0
   let spinOnly = 0
   let dead = 0
-  const spinFillers = detail ? new Set<string>() : undefined
   for (const [i, c] of cls) {
     if (c === 2) tuck++
     else if (c === 1) {
       spinOnly++
-      for (const t of fillers.get(i) ?? []) spinFillers?.add(t)
-    } else dead++
+      awkward?.set(i, [...(fillers.get(i) ?? [])].sort())
+    } else {
+      dead++
+      awkward?.set(i, 'dead')
+    }
   }
-  return { tuck, spinOnly, dead, spinFillers }
+  return { tuck, spinOnly, dead, awkward }
 }
 
 const TYPES = ['T', 'L', 'J', 'I', 'S', 'Z', 'O'] as const

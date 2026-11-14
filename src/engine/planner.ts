@@ -150,12 +150,16 @@ export const WEIGHTS = {
   /** plain line clear with no streak to lose: wasteful but harmless */
   plainClear: 2,
   /** a cell sealed off from the open area (unreachable without clearing lines above it) */
-  sealed: 8,
+  sealed: 11,
   /** a covered gap a piece can slide or drop into (overhang, tuck): needed for spins, so cheap */
   holes: 2,
   /** a covered pocket only a spin can fill: a setup the plan must actually use, else a liability */
   spinPocket: 9,
   bumpiness: 0.35,
+  /** squared height steps between neighbours: towers and cliffs cost far more than gentle slopes */
+  bumpSquared: 0.08,
+  /** per cell a 1-wide well is deeper than 2 (only an I fills those): minimise I dependency */
+  iWell: 3,
   height: 0.15,
   /** extra per row of max height above `dangerRow` */
   danger: 3,
@@ -278,6 +282,10 @@ export interface BoardEval {
   /** slot lines: optimistic (shape only) until `confirmed`, then reachability-checked */
   confirmed: boolean
   bumpiness: number
+  /** sum of squared neighbour height differences */
+  bumpSquared: number
+  /** total depth beyond 2 of 1-wide wells (walls count as high) */
+  iWells: number
   height: number
   maxHeight: number
   slot: number
@@ -288,14 +296,39 @@ export function evaluateBoard(board: Board): BoardEval {
   let holes = 0
   for (let x = 0; x < WIDTH; x++) for (let y = 0; y < h[x]; y++) if (!board[y * WIDTH + x]) holes++
   let bump = 0
-  for (let x = 0; x < WIDTH - 1; x++) bump += Math.abs(h[x] - h[x + 1])
+  let bumpSquared = 0
+  for (let x = 0; x < WIDTH - 1; x++) {
+    const d = h[x] - h[x + 1]
+    bump += Math.abs(d)
+    bumpSquared += d * d
+  }
+  // wells deeper than 2: a J/L can fill 3 deep only with luck, deeper needs an I
+  let iWells = 0
+  for (let x = 0; x < WIDTH; x++) {
+    const l = x === 0 ? Infinity : h[x - 1]
+    const r = x === WIDTH - 1 ? Infinity : h[x + 1]
+    const depth = Math.min(l, r) - h[x]
+    if (depth > 2 && depth !== Infinity) iWells += depth - 2
+  }
   const height = h.reduce((a, b) => a + b, 0)
   const sealed = holes ? sealedHoles(board, h) : 0
   // optimistic: the best shape-only candidate. confirmSlot() replaces it with the reachable value.
   let slot = 0
   for (const v of tSlotCandidates(board, h).values()) if (v > slot) slot = v
   return withSlot(
-    { holes, rawHoles: holes, sealed, spinPockets: 0, confirmed: false, bumpiness: bump, height, maxHeight: Math.max(...h), slot },
+    {
+      holes,
+      rawHoles: holes,
+      sealed,
+      spinPockets: 0,
+      confirmed: false,
+      bumpiness: bump,
+      bumpSquared,
+      iWells,
+      height,
+      maxHeight: Math.max(...h),
+      slot,
+    },
     slot,
   )
 }
@@ -386,6 +419,7 @@ function scoreNode(n: Node, queue: readonly PieceType[]): number {
   const e = n.eval
   let s = n.attack * w.attack + n.clearBonus - n.breaks * w.b2bBreak - n.plain * w.plainClear
   s -= e.sealed * w.sealed + e.holes * w.holes + e.spinPockets * w.spinPocket + e.bumpiness * w.bumpiness + e.height * w.height
+  s -= e.bumpSquared * w.bumpSquared + e.iWells * w.iWell
   if (e.maxHeight > w.dangerRow) s -= (e.maxHeight - w.dangerRow) * w.danger
   if (e.slot) s += e.slot * (tLeft(n, queue) ? w.tSlot : w.tSlotNoT)
   return s
@@ -624,6 +658,42 @@ function replay(req: PlanRequest, follow: readonly FollowStep[]): Node | null {
   return n
 }
 
+/** A placement still to be made: a piece and the cells it should cover (starting-board coordinates). */
+export interface Target {
+  type: PieceType
+  cells: readonly Cell[]
+}
+
+/**
+ * Finish a setup in any order: find a sequence that places every target with
+ * the pieces available (piece in hand, hold, queue), each at a reachable spot,
+ * never breaking B2B. Tries the given order first (no hold, then hold), so an
+ * in-order follower gets the original plan back. Null if no order works.
+ */
+export function completePlan(req: PlanRequest, targets: readonly Target[]): Plan | null {
+  const want = targets.map((t) => ({ type: t.type, key: cellSetKey([...t.cells]) }))
+  const dfs = (n: Node, left: typeof want): Node | null => {
+    if (!left.length) return n
+    for (const t of transitions(n, req.queue)) {
+      for (let i = 0; i < left.length; i++) {
+        if (left[i].type !== t.type) continue
+        const c = findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule: req.spinRule }).find(
+          (c) => cellSetKey(c.cells.map(([x, y]): Cell => [x, n.rows[y]])) === left[i].key,
+        )
+        if (!c || c.result.b2bChange === 'broken') continue
+        const done = dfs(apply(n, c, t.nextCurrent, t.hold, t.next, req.queue), [...left.slice(0, i), ...left.slice(i + 1)])
+        if (done) return done
+      }
+    }
+    return null
+  }
+  const end = dfs(rootNode(req), want)
+  if (!end) return null
+  const p = toPlan(end, true)
+  annotate(p, req.board)
+  return p
+}
+
 /** The remaining steps of a plan, re-scored on the current state; null if no longer possible. */
 export function replayPlan(req: PlanRequest, follow: readonly FollowStep[]): Plan | null {
   const n = replay(req, follow)
@@ -704,34 +774,60 @@ export function searchPlans(
 const article = (t: string) => (t === 'I' || t === 'L' || t === 'O' || t === 'S' ? 'an' : 'a')
 
 /**
- * Explain a shown plan: replay its steps from the starting board and note any
- * step that leaves a pocket only a spin can fill, or a hole nothing can reach.
+ * Explain a shown plan: replay its steps from the starting board, track every
+ * awkward cell (sealed, unreachable, or spin-only) in starting-board coordinates
+ * through line clears, and note each step that creates one the plan never uses.
  */
 function annotate(p: Plan, root: Board) {
+  type Kind = string[] | 'sealed' | 'dead'
   let board = root
-  let prev = classifyPockets(board)
-  let prevSealed = sealedHoles(board)
-  const start = { spin: prev.spinOnly, dead: prev.dead + prevSealed }
-  for (const st of p.steps) {
-    board = placeOnBoard(board, st.piece)
-    clearLines(board)
-    const now = classifyPockets(board, undefined, true)
-    const sealed = sealedHoles(board)
-    const newDead = now.dead + sealed - (prev.dead + prevSealed)
-    const newSpin = now.spinOnly - prev.spinOnly
-    if (newDead > 0) st.note = `leaves ${newDead === 1 ? 'a hole' : `${newDead} holes`} no piece can reach`
-    else if (newSpin > 0) {
-      const who = [...(now.spinFillers ?? [])].sort()
-      st.note = who.length
-        ? `leaves a pocket only ${article(who[0])} ${who.join(' or ')} spin can fill`
-        : 'leaves a pocket only a spin can fill'
+  let rows = Array.from({ length: HEIGHT }, (_, i) => i) // current row → starting-board row
+  const awkwardNow = (b: Board) => {
+    const m = new Map<string, Kind>()
+    for (const [i, kind] of classifyPockets(b, undefined, true).awkward ?? []) {
+      const x = i % WIDTH
+      m.set(`${x},${rows[(i - x) / WIDTH]}`, kind)
     }
-    prev = now
-    prevSealed = sealed
+    return m
   }
-  p.awkward = Math.max(0, prev.spinOnly + prev.dead + prevSealed - start.spin - start.dead)
-  // a T-slot's cavity is the point of the plan, not an awkward spot
-  if (p.slotAfter) p.awkward = Math.max(0, p.awkward - 2)
+  const before = awkwardNow(board)
+  const created: Map<string, Kind>[] = []
+  let prev = before
+  for (const st of p.steps) {
+    const placed = placeOnBoard(board, st.piece)
+    // rows this lock clears, to keep `rows` mapped to the starting board
+    const cleared: number[] = []
+    for (let y = 0; y < HEIGHT; y++) {
+      let full = true
+      for (let x = 0; x < WIDTH && full; x++) if (!placed[y * WIDTH + x]) full = false
+      if (full) cleared.push(y)
+    }
+    if (cleared.length) {
+      const kept = rows.filter((_, y) => !cleared.includes(y))
+      let top = rows[rows.length - 1]
+      while (kept.length < rows.length) kept.push(++top)
+      rows = kept
+    }
+    clearLines(placed)
+    board = placed
+    const now = awkwardNow(board)
+    created.push(new Map([...now].filter(([k]) => !prev.has(k))))
+    prev = now
+  }
+  // a planned T-slot's cavity is the point of the setup
+  const isSlot = (kind: Kind) => p.slotAfter > 0 && Array.isArray(kind) && kind.includes('T')
+  const left = new Map([...prev].filter(([k, kind]) => !before.has(k) && !isSlot(kind)))
+  p.steps.forEach((st, i) => {
+    const mine = [...created[i]].filter(([k]) => left.has(k)).map(([, kind]) => kind)
+    if (!mine.length) return
+    const holes = mine.filter((k) => !Array.isArray(k)).length
+    if (holes) st.note = `leaves ${holes === 1 ? 'a hole' : `${holes} holes`} no piece can reach`
+    else {
+      const who = [...new Set(mine.flat() as string[])].sort()
+      st.note = who.length ? `leaves a pocket only ${article(who[0])} ${who.join(' or ')} spin can fill` : 'leaves a pocket only a spin can fill'
+    }
+  })
+  p.awkward = left.size
   p.summary = describe(p)
 }
 
