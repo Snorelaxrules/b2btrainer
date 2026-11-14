@@ -13,7 +13,6 @@ export const KEYS = {
   rotate180: ['KeyA'],
   hold: ['ShiftLeft', 'ShiftRight', 'KeyC'],
   restart: ['KeyR'],
-  toggleFinder: ['KeyF'],
   togglePlan: ['KeyP'],
 } satisfies Record<string, string[]>
 

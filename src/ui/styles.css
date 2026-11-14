@@ -132,3 +132,15 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12
 .plan-note { margin: 8px 0 0; padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.04); font-size: 13px; }
 .warn { color: #facc15; font-weight: 600; }
 .dev { margin: 8px 0 0; color: #7aa2ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+
+.step-note { margin-top: 3px; font-size: 12px; color: #facc15; }
+.seg { display: inline-flex; margin-top: 8px; border: 1px solid var(--panel-edge); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 5px 12px; background: #0f1118; }
+.seg button + button { border-left: 1px solid var(--panel-edge); }
+.seg button.on { background: rgba(74, 222, 128, 0.14); color: #b9f5c6; }
+
+.slider { display: grid; grid-template-columns: 38px 1fr 92px; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
+.slider-label { font-weight: 600; }
+.slider input[type=range] { width: 100%; accent-color: var(--accent); padding: 0; }
+.slider-value { font-variant-numeric: tabular-nums; text-align: right; }
+.slider-value small { color: var(--muted); }

@@ -9,6 +9,7 @@
  * The board is a Uint8Array that is never mutated after it is created: a lock
  * copies it. Treat `state.board` as read-only.
  */
+import { SOFT_DROP_BASE } from '../config/handling'
 import { DEFAULT_RULES, type Rules } from '../config/rules'
 import { BOX_SIZE, PIECES, type PieceType, type Rotation, SHAPES, kickTests } from './pieces'
 import { type BagState, drawPiece, newBag } from './rng'
@@ -408,9 +409,13 @@ export function lockPiece(s: GameState, p: ActivePiece): GameState {
  * `softFactor` multiplies gravity for finite soft drop factors.
  */
 export function tick(s: GameState, dt: number, softFactor = 1): GameState {
-  if (!playable(s) || s.rules.gravity === 'none') return s
+  if (!playable(s)) return s
+  const noGravity = s.rules.gravity === 'none'
+  // gravity off: nothing falls unless a finite soft drop is held, and nothing locks by itself
+  if (noGravity && softFactor <= 1) return s
   const time = s.time + dt
   const p = s.active
+  if (noGravity && isGrounded(s.board, p)) return s
   if (isGrounded(s.board, p)) {
     const lock = { ...s.lock, gravityAcc: 0, touched: true }
     if (lock.resets >= s.rules.maxLockResets) return lockPiece({ ...s, time, lock }, p)
@@ -418,7 +423,8 @@ export function tick(s: GameState, dt: number, softFactor = 1): GameState {
     if (timer >= s.rules.lockDelay) return lockPiece({ ...s, time, lock }, p)
     return { ...s, time, lock: { ...lock, timer } }
   }
-  let acc = s.lock.gravityAcc + (dt / 1000) * s.rules.gravitySpeed * softFactor
+  const speed = noGravity ? SOFT_DROP_BASE : s.rules.gravitySpeed
+  let acc = s.lock.gravityAcc + (dt / 1000) * speed * softFactor
   let cur: ActivePiece = p
   let lock = s.lock
   while (acc >= 1) {

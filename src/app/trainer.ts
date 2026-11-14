@@ -3,7 +3,7 @@
  * Owns the Session, the InputController and the frame loop; React only mounts
  * it and subscribes to discrete events (never per frame).
  */
-import { HANDLING } from '../config/handling'
+import { HANDLING, type Handling } from '../config/handling'
 import type { Action } from '../config/keys'
 import { DEFAULT_RULES, type GravityMode, type Rules } from '../config/rules'
 import { SPIN_RULE_LABELS, type SpinRule } from '../config/scoring'
@@ -13,8 +13,6 @@ import { Session } from '../engine/session'
 import { InputController } from '../input/controller'
 import { bindKeyboard } from '../input/keyboard'
 import { type Overlay, Renderer } from '../render/renderer'
-import { FinderOverlay } from '../render/finderOverlay'
-import { FinderController, type FinderToggles } from './finder'
 import { PlanOverlay } from '../render/planOverlay'
 import { PlannerController, type PlannerSettings } from './planner'
 
@@ -25,11 +23,25 @@ export interface TrainerSettings {
   customQueue: string
   gravity: GravityMode
   spinRule: SpinRule
-  finder: FinderToggles
   planner: PlannerSettings
+  handling: Handling
 }
 
 const STORAGE_KEY = 'b2btrainer.settings.v1'
+
+/** Saved handling, validated (JSON can't hold Infinity: an SDF of 0/null means ∞). */
+function loadHandling(saved: unknown): Handling {
+  const h = { ...HANDLING }
+  if (!saved || typeof saved !== 'object') return h
+  const s = saved as Record<string, unknown>
+  const num = (v: unknown, lo: number, hi: number) => (typeof v === 'number' && v >= lo && v <= hi ? v : null)
+  h.das = num(s.das, 0, 1000) ?? h.das
+  h.arr = num(s.arr, 0, 1000) ?? h.arr
+  h.dcd = num(s.dcd, 0, 1000) ?? h.dcd
+  h.sdf = s.sdf === null || s.sdf === 0 ? Infinity : (num(s.sdf, 1, 100) ?? h.sdf)
+  if (typeof s.carryDas === 'boolean') h.carryDas = s.carryDas
+  return h
+}
 
 function loadSettings(): TrainerSettings {
   const base: TrainerSettings = {
@@ -38,8 +50,8 @@ function loadSettings(): TrainerSettings {
     customQueue: '',
     gravity: DEFAULT_RULES.gravity,
     spinRule: DEFAULT_RULES.spinRule,
-    finder: { enabled: false, showOther: false, includeHold: false },
     planner: { depth: 5, beam: 100, miniSpins: 'existing' },
+    handling: { ...HANDLING },
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -52,12 +64,11 @@ function loadSettings(): TrainerSettings {
       gravity: saved.gravity === 'normal' ? 'normal' : 'none',
       spinRule: saved.spinRule && saved.spinRule in SPIN_RULE_LABELS ? saved.spinRule : base.spinRule,
       seed: saved.lockSeed && typeof saved.seed === 'number' ? saved.seed : base.seed,
-      // the per-piece finder overlay became secondary when the planner arrived: off unless chosen since
-      finder: saved.planner && typeof saved.finder === 'object' ? { ...base.finder, ...saved.finder } : base.finder,
+      handling: loadHandling(saved.handling),
       planner: {
         depth: typeof saved.planner?.depth === 'number' ? saved.planner.depth : base.planner.depth,
         beam: typeof saved.planner?.beam === 'number' ? saved.planner.beam : base.planner.beam,
-        miniSpins: (['off', 'existing', 'any'] as const).find((m) => m === saved.planner?.miniSpins) ?? 'existing',
+        miniSpins: saved.planner?.miniSpins === 'off' ? 'off' : 'existing',
       },
     }
   } catch {
@@ -69,12 +80,17 @@ export class Trainer {
   settings: TrainerSettings
   readonly session: Session
   readonly input = new InputController(HANDLING)
-  readonly finder: FinderController
+
+  setHandling(patch: Partial<Handling>) {
+    const handling = { ...this.settings.handling, ...patch }
+    this.input.setHandling(handling)
+    this.update({ handling })
+  }
   readonly planner: PlannerController
   /** state as of the last session event (to see what a placement did) */
   private seen: GameState
   overlays: Overlay[]
-  /** a hold triggered by Shift, undone if Tab follows (Shift+Tab cycles the finder) */
+  /** a hold triggered by Shift, undone if Tab follows (Shift+Tab cycles plans) */
   private shiftHold: { before: GameState; after: GameState } | null = null
   /** wall-clock start of the current game (first input), for PPS/APM */
   private startedAt: number | null = null
@@ -84,17 +100,15 @@ export class Trainer {
 
   constructor() {
     this.settings = loadSettings()
+    this.input.setHandling(this.settings.handling)
     this.session = new Session(this.gameOptions())
-    this.finder = new FinderController(this.settings.finder)
     this.planner = new PlannerController(this.settings.planner)
-    this.overlays = [new FinderOverlay(this.finder), new PlanOverlay(this.planner)]
-    this.finder.recompute(this.session.state)
+    this.overlays = [new PlanOverlay(this.planner)]
     this.seen = this.session.state
     this.session.subscribe((e) => {
       const s = this.session.state
       if (e === 'over') this.endedAt = performance.now()
       if (e === 'undo' || e === 'redo') this.endedAt = s.over ? this.endedAt : null
-      this.finder.recompute(s)
       const rule = this.settings.spinRule
       if (e === 'place') this.planner.onPlace(this.seen, s, rule)
       else if (e === 'hold') this.planner.onHold(s, rule)
@@ -114,11 +128,6 @@ export class Trainer {
   setPlanner(patch: Partial<PlannerSettings>) {
     this.planner.setSettings(patch, this.session.state, this.settings.spinRule)
     this.update({ planner: this.planner.settings })
-  }
-
-  setFinder(patch: Partial<FinderToggles>) {
-    this.finder.setToggles(patch, this.session.state)
-    this.update({ finder: this.finder.toggles })
   }
 
   get rules(): Rules {
@@ -152,9 +161,12 @@ export class Trainer {
   update(patch: Partial<TrainerSettings>) {
     this.settings = { ...this.settings, ...patch }
     if (patch.gravity || patch.spinRule) this.session.setRules(this.rules)
-    if (patch.spinRule) this.finder.recompute(this.session.state, true)
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings))
+      const h = this.settings.handling
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ ...this.settings, handling: { ...h, sdf: Number.isFinite(h.sdf) ? h.sdf : 0 } }),
+      )
     } catch {
       // storage unavailable (private mode etc.): settings just won't persist
     }
@@ -173,7 +185,6 @@ export class Trainer {
   private press(action: Action, t: number, code: string) {
     this.shiftHold = null
     if (action === 'restart') return this.restart(!this.settings.lockSeed)
-    if (action === 'toggleFinder') return this.setFinder({ enabled: !this.finder.toggles.enabled })
     if (action === 'togglePlan') return this.planner.toggle(this.session.state, this.settings.spinRule)
     if (this.startedAt === null && !this.session.state.over) this.startedAt = t
     const before = this.session.state
@@ -188,8 +199,7 @@ export class Trainer {
     const sh = this.shiftHold
     this.shiftHold = null
     if (dir < 0 && sh && this.session.state === sh.after) this.session.revert(sh.before)
-    if (this.planner.active && this.planner.plans.length) this.planner.cycle(dir)
-    else this.finder.cycle(dir)
+    this.planner.cycle(dir)
   }
 
   /** Attach to a canvas and its container. Returns cleanup (listeners, loop, observer). */
@@ -209,18 +219,6 @@ export class Trainer {
       blur: () => this.input.reset(),
     })
 
-    const pointer = (e: PointerEvent) => {
-      const r = canvas.getBoundingClientRect()
-      const cell = renderer.view.cellAt(e.clientX - r.left, e.clientY - r.top)
-      const c = cell ? this.finder.candidateAt(cell[0], cell[1]) : null
-      if (e.type === 'pointerdown') this.finder.select(c ? c.id : null)
-      else this.finder.hover(c ? c.id : null)
-    }
-    const leave = () => this.finder.hover(null)
-    canvas.addEventListener('pointermove', pointer)
-    canvas.addEventListener('pointerdown', pointer)
-    canvas.addEventListener('pointerleave', leave)
-
     let raf = 0
     let last = performance.now()
     const frame = (now: number) => {
@@ -237,9 +235,6 @@ export class Trainer {
       cancelAnimationFrame(raf)
       unbind()
       this.planner.dispose()
-      canvas.removeEventListener('pointermove', pointer)
-      canvas.removeEventListener('pointerdown', pointer)
-      canvas.removeEventListener('pointerleave', leave)
       ro.disconnect()
       this.input.reset()
     }

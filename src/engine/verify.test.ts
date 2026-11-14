@@ -23,7 +23,7 @@ function planOf(cands: { c: Candidate; type: G.ActivePiece['type'] }[]): Plan {
     cells: c.cells,
     sealed: 0,
   }))
-  return { steps, payoffs: [], payoff: -1, attack: 0, b2bClears: 0, breaks: 0, slotAfter: 0, newSealed: 0, score: 0, summary: 'hand-made' }
+  return { steps, payoffs: [], payoff: -1, attack: 0, b2bClears: 0, breaks: 0, slotAfter: 0, newSealed: 0, awkward: 0, score: 0, summary: 'hand-made' }
 }
 
 /** TSD slot at columns 1–3 (T points down into column 2), roofed at (1,2)… open above columns 2–3. */
@@ -159,5 +159,10 @@ describe('only known pieces', () => {
         ]),
       ).ok,
     ).toBe(false)
+  })
+
+  it('verifying with no known queue at all does not crash (robustness; the app always has previews)', () => {
+    const r = request({ current: 'O', hold: null, holdUsed: true, queue: [], depth: 1 })
+    expect(searchPlans(r).length).toBeGreaterThan(0)
   })
 })

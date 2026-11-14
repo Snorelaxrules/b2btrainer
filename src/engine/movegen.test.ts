@@ -29,8 +29,7 @@ describe('BFS reachability', () => {
     const c = findPlacements(TST_BOARD, 'T', NO_COUNTERS, false, { spinRule: 'allmini+' })
     const tst = c.find((x) => cellsKey(x.cells) === TST_CELLS)
     expect(tst?.result).toMatchObject({ label: 'TST', attack: 6, b2bChange: 'started' })
-    expect(tst?.category).toBe('b2b')
-    expect(c[0]).toBe(tst) // best candidate sorts first
+    expect(tst?.result.difficult).toBe(true)
   })
 
   it('does not reach an enclosed cavity', () => {

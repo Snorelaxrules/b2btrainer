@@ -1,6 +1,6 @@
 const ROWS: [string, string][] = [
-  ['← →', 'move (DAS 75 ms, ARR 0)'],
-  ['↓', 'soft drop (to floor, no lock)'],
+  ['← →', 'move (DAS/ARR in Handling)'],
+  ['↓', 'soft drop (no lock)'],
   ['Space', 'hard drop'],
   ['↑ / X', 'rotate CW'],
   ['Z', 'rotate CCW'],
@@ -10,8 +10,7 @@ const ROWS: [string, string][] = [
   ['Ctrl+Y / Ctrl+Shift+Z', 'redo'],
   ['R', 'restart'],
   ['P', 'find a spin setup from here / stop'],
-  ['F', 'all-placements overlay on/off'],
-  ['Tab / Shift+Tab', 'next / previous plan (or placement)'],
+  ['Tab / Shift+Tab', 'next / previous plan'],
 ]
 
 export function ControlsHelp() {

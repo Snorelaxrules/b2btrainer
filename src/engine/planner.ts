@@ -19,15 +19,17 @@ import {
   HEIGHT,
   VISIBLE,
   WIDTH,
+  clearLines,
   newGame,
   pieceCells,
+  placeOnBoard,
   spawnPiece,
 } from './game'
 import { type Move, reachablePlacements } from './movegen'
-import { type PieceType, SHAPES } from './pieces'
+import { PIECES, type PieceType, SHAPES } from './pieces'
 import { type ClearResult, type Counters, detectSpin, spinBasis } from './scoring'
 import { verifyPlan } from './verify'
-import { heights, sealedHoles } from './features'
+import { classifyPockets, heights, sealedHoles } from './features'
 
 export interface PlanRequest {
   board: Board
@@ -72,6 +74,8 @@ export interface PlanStep {
   cells: Cell[]
   /** sealed holes on the board right after this step */
   sealed: number
+  /** why this step costs something, when it does (e.g. "leaves a pocket only an L spin can fill") */
+  note?: string
 }
 
 export interface Plan {
@@ -88,6 +92,8 @@ export interface Plan {
   slotAfter: number
   /** sealed holes the shown steps add (negative: they open some up) */
   newSealed: number
+  /** awkward pockets (spin-only or unreachable) the shown steps leave behind */
+  awkward: number
   score: number
   /** the plan the player was already following */
   followed?: boolean
@@ -122,7 +128,10 @@ export function stateFromRequest(req: PlanRequest): GameState {
     active: spawnPiece(req.current),
     hold: req.hold,
     holdUsed: req.holdUsed,
-    queue: [...req.queue],
+    // pad past the known pieces so the engine never spawns from an empty queue
+    // after a plan that uses every visible piece (it can't depend on the padding:
+    // verification checks each step's piece type)
+    queue: [...req.queue, ...PIECES],
   }
 }
 
@@ -142,8 +151,10 @@ export const WEIGHTS = {
   plainClear: 2,
   /** a cell sealed off from the open area (unreachable without clearing lines above it) */
   sealed: 8,
-  /** a covered gap that is still open to the side (overhang, tuck, slot): needed for spins, so cheap */
+  /** a covered gap a piece can slide or drop into (overhang, tuck): needed for spins, so cheap */
   holes: 2,
+  /** a covered pocket only a spin can fill: a setup the plan must actually use, else a liability */
+  spinPocket: 9,
   bumpiness: 0.35,
   height: 0.15,
   /** extra per row of max height above `dangerRow` */
@@ -190,7 +201,7 @@ export function tSlotLines(board: Board, h: number[] = heights(board)): number {
   const cands = tSlotCandidates(board, h)
   if (!cands.size) return 0
   let best = 0
-  for (const r of reachablePlacements(board, 'T')) {
+  for (const r of reachablePlacements(board, 'T', undefined, { paths: false })) {
     if (!r.piece.rotated) continue
     const lines = cands.get(cellSetKey(pieceCells(r.piece)))
     if (lines && lines > best && detectSpin(board, r.piece, 'tspin') === 'full') best = lines
@@ -260,8 +271,10 @@ export interface BoardEval {
   holes: number
   /** every empty cell under a block in its column */
   rawHoles: number
-  /** of those, cells sealed off from the open area */
+  /** of those, cells sealed off from the open area, or open but unreachable by any piece */
   sealed: number
+  /** open pockets only a spin can fill (after the reachability check) */
+  spinPockets: number
   /** slot lines: optimistic (shape only) until `confirmed`, then reachability-checked */
   confirmed: boolean
   bumpiness: number
@@ -282,7 +295,7 @@ export function evaluateBoard(board: Board): BoardEval {
   let slot = 0
   for (const v of tSlotCandidates(board, h).values()) if (v > slot) slot = v
   return withSlot(
-    { holes, rawHoles: holes, sealed, confirmed: false, bumpiness: bump, height, maxHeight: Math.max(...h), slot },
+    { holes, rawHoles: holes, sealed, spinPockets: 0, confirmed: false, bumpiness: bump, height, maxHeight: Math.max(...h), slot },
     slot,
   )
 }
@@ -292,11 +305,42 @@ function withSlot(e: BoardEval, slot: number): BoardEval {
   return { ...e, slot, holes: Math.max(0, e.rawHoles - e.sealed - (slot ? 1 : 0)) }
 }
 
-/** Run the real reachability check for a node's slot (once) and re-score it. */
-function confirmSlot(n: Node, queue: readonly PieceType[]) {
+/**
+ * Run the real move-search checks for a node (once) and re-score it: is its
+ * T-slot reachable, and what can actually fill each covered pocket?
+ */
+/** Per-search memo of the move-search checks, keyed by board shape. */
+type CheckMemo = Map<number, { slot: number; pockets: ReturnType<typeof classifyPockets> | null }>
+
+function shapeHash(b: Board): number {
+  let h = 0x811c9dc5
+  const top = Math.min(HEIGHT, VISIBLE + 4) * WIDTH
+  for (let i = 0; i < top; i++) {
+    h ^= b[i] ? 1 : 0
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
+function confirmSlot(n: Node, queue: readonly PieceType[], memo?: CheckMemo) {
   if (n.eval.confirmed) return
-  const slot = n.eval.slot ? tSlotLines(n.board) : 0
-  n.eval = { ...withSlot(n.eval, slot), confirmed: true }
+  const key = memo ? shapeHash(n.board) : 0
+  let m = memo?.get(key)
+  if (!m) {
+    const slot0 = n.eval.slot ? tSlotLines(n.board) : 0
+    const pockets = n.eval.rawHoles > n.eval.sealed ? classifyPockets(n.board) : null
+    m = { slot: slot0, pockets }
+    memo?.set(key, m)
+  }
+  const slot = m.slot
+  let e: BoardEval = { ...withSlot(n.eval, slot), confirmed: true }
+  if (m.pockets) {
+    const p = m.pockets
+    // a reachable T-slot's own cavity is the point of the setup, not a liability
+    const spinPockets = Math.max(0, p.spinOnly - (slot ? 2 : 0))
+    e = { ...e, sealed: e.sealed + p.dead, spinPockets, holes: p.tuck }
+  }
+  n.eval = e
   n.score = scoreNode(n, queue)
 }
 
@@ -341,7 +385,7 @@ function scoreNode(n: Node, queue: readonly PieceType[]): number {
   const w = WEIGHTS
   const e = n.eval
   let s = n.attack * w.attack + n.clearBonus - n.breaks * w.b2bBreak - n.plain * w.plainClear
-  s -= e.sealed * w.sealed + e.holes * w.holes + e.bumpiness * w.bumpiness + e.height * w.height
+  s -= e.sealed * w.sealed + e.holes * w.holes + e.spinPockets * w.spinPocket + e.bumpiness * w.bumpiness + e.height * w.height
   if (e.maxHeight > w.dangerRow) s -= (e.maxHeight - w.dangerRow) * w.danger
   if (e.slot) s += e.slot * (tLeft(n, queue) ? w.tSlot : w.tSlotNoT)
   return s
@@ -505,7 +549,9 @@ function describeMain(p: Omit<Plan, 'summary'>): string {
     return `${parts.join(' → ')} · ${b2b} · ${seq}`
   }
   if (p.slotAfter) return `Builds a ${['', 'TSS', 'TSD', 'TST'][p.slotAfter]} slot · ${seq}`
-  return `Clean stacking · ${seq}`
+  if (p.awkward)
+    return `No B2B-safe clear with these pieces: least-bad stacking, leaves ${p.awkward} awkward spot${p.awkward > 1 ? 's' : ''} · ${seq}`
+  return `No B2B-safe clear with these pieces: stacking cleanly · ${seq}`
 }
 
 function toPlan(n: Node, followed = false, rootSealed = n.rootSealed): Plan {
@@ -526,6 +572,7 @@ function toPlan(n: Node, followed = false, rootSealed = n.rootSealed): Plan {
     // the slot after the SHOWN steps: only known when the plan isn't cut at a payoff
     slotAfter: payoffs.length ? 0 : n.eval.slot,
     newSealed: 0,
+    awkward: 0,
     score: n.score,
     followed,
   }
@@ -580,7 +627,10 @@ function replay(req: PlanRequest, follow: readonly FollowStep[]): Node | null {
 /** The remaining steps of a plan, re-scored on the current state; null if no longer possible. */
 export function replayPlan(req: PlanRequest, follow: readonly FollowStep[]): Plan | null {
   const n = replay(req, follow)
-  return n ? toPlan(n, true) : null
+  if (!n) return null
+  const p = toPlan(n, true)
+  annotate(p, req.board)
+  return p
 }
 
 /**
@@ -600,6 +650,7 @@ export function searchPlans(
   let nodes = 0
   let plans: Plan[] = []
   const tally = { discarded: 0 }
+  const memo: CheckMemo = new Map()
   const depth = Math.max(1, Math.min(6, req.depth))
   for (let d = 1; d <= depth; d++) {
     const children: Node[] = []
@@ -611,11 +662,22 @@ export function searchPlans(
     if (!children.length) break
     // stage 1: rank by the optimistic score (cheap slot shape check)
     children.sort((a, b) => b.score - a.score)
-    // stage 2: confirm slots by real move search for the front-runners only, then re-rank
-    const front = children.slice(0, Math.max(req.beam * 2, 40))
-    for (const c of front) confirmSlot(c, req.queue)
+    // stage 2: confirm slots and pockets by real move search for the front-runners
+    // only (distinct boards first: different orders often reach the same board), then re-rank
+    const front: Node[] = []
+    const frontKeys = new Set<string>()
+    for (const c of children) {
+      if (front.length >= Math.max(req.beam, 40)) break
+      const k = boardKey(c)
+      if (frontKeys.has(k)) continue
+      frontKeys.add(k)
+      front.push(c)
+    }
+    for (const c of front) confirmSlot(c, req.queue, memo)
     front.sort((a, b) => b.score - a.score)
-    children.splice(0, front.length, ...front)
+    const rest = children.filter((c) => !c.eval.confirmed)
+    children.length = 0
+    children.push(...front, ...rest)
     // keep the best nodes, but no first move may take more than a third of the
     // beam, so alternative plans survive to the end
     const seen = new Set<string>()
@@ -629,18 +691,52 @@ export function searchPlans(
       if (used >= cap) continue
       seen.add(k)
       perFirst.set(c.first, used + 1)
-      confirmSlot(c, req.queue) // no unconfirmed slot ever reaches a plan
+      confirmSlot(c, req.queue, memo) // no unconfirmed slot ever reaches a plan
       beam.push(c)
       if (beam.length >= req.beam) break
     }
-    plans = pickPlans(beam, top, start, tally)
+    plans = pickPlans(beam, top, start, tally, req.board)
     onProgress?.({ depthDone: d, plans, nodes, ms: performance.now() - t0, discarded: tally.discarded })
   }
   return plans
 }
 
+const article = (t: string) => (t === 'I' || t === 'L' || t === 'O' || t === 'S' ? 'an' : 'a')
+
+/**
+ * Explain a shown plan: replay its steps from the starting board and note any
+ * step that leaves a pocket only a spin can fill, or a hole nothing can reach.
+ */
+function annotate(p: Plan, root: Board) {
+  let board = root
+  let prev = classifyPockets(board)
+  let prevSealed = sealedHoles(board)
+  const start = { spin: prev.spinOnly, dead: prev.dead + prevSealed }
+  for (const st of p.steps) {
+    board = placeOnBoard(board, st.piece)
+    clearLines(board)
+    const now = classifyPockets(board, undefined, true)
+    const sealed = sealedHoles(board)
+    const newDead = now.dead + sealed - (prev.dead + prevSealed)
+    const newSpin = now.spinOnly - prev.spinOnly
+    if (newDead > 0) st.note = `leaves ${newDead === 1 ? 'a hole' : `${newDead} holes`} no piece can reach`
+    else if (newSpin > 0) {
+      const who = [...(now.spinFillers ?? [])].sort()
+      st.note = who.length
+        ? `leaves a pocket only ${article(who[0])} ${who.join(' or ')} spin can fill`
+        : 'leaves a pocket only a spin can fill'
+    }
+    prev = now
+    prevSealed = sealed
+  }
+  p.awkward = Math.max(0, prev.spinOnly + prev.dead + prevSealed - start.spin - start.dead)
+  // a T-slot's cavity is the point of the plan, not an awkward spot
+  if (p.slotAfter) p.awkward = Math.max(0, p.awkward - 2)
+  p.summary = describe(p)
+}
+
 /** Best plans with distinct first moves; with `start`, only plans the engine reproduces. */
-function pickPlans(beam: Node[], top: number, start: GameState | null, tally: { discarded: number }): Plan[] {
+function pickPlans(beam: Node[], top: number, start: GameState | null, tally: { discarded: number }, root?: Board): Plan[] {
   const out: Plan[] = []
   const firsts = new Set<string>()
   for (const n of beam) {
@@ -653,6 +749,7 @@ function pickPlans(beam: Node[], top: number, start: GameState | null, tally: { 
       continue
     }
     firsts.add(k)
+    if (root) annotate(p, root)
     out.push(p)
     if (out.length >= top) break
   }

@@ -144,4 +144,16 @@ describe('planner', () => {
       expect(labels(searchPlans(req('off'))).filter((l) => /Spin/.test(l) && !/^TS|^T-Spin/.test(l))).toEqual([])
     })
   })
+
+  it('explains itself when there is no clean option (a player\'s board with a well and a notch)', () => {
+    const board = boardFromRows(['#.........', '#.........', '##.......#', '##......##', '###.....##', '####...###', '####..####', '####.#####'])
+    const plans = searchPlans({ board, counters: { b2b: 2, combo: -1 }, current: 'L', hold: 'I', holdUsed: false, queue: ['O', 'J', 'S', 'I', 'Z'], depth: 5, beam: 60, spinRule: 'allmini+' })
+    expect(plans.length).toBeGreaterThan(0)
+    for (const p of plans) {
+      // no B2B-safe clear exists here, and the summary must not pretend the stack stays clean
+      expect(p.payoffs).toEqual([])
+      if (p.awkward) expect(p.summary).toMatch(/least-bad stacking/)
+      if (p.awkward) expect(p.steps.some((s) => s.note)).toBe(true)
+    }
+  })
 })

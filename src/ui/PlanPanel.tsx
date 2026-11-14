@@ -40,6 +40,7 @@ function Step({ st, payoff }: { st: PlanStep; payoff: boolean }) {
           </span>
         )}
       </div>
+      {st.note && <div className="step-note">{st.note}</div>}
       <div className="keyseq">
         {keys.map((k, i) => (
           <kbd key={i}>{MOVE_LABEL[k]}</kbd>
@@ -131,20 +132,26 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
         )}
       </div>
 
-      <label className="field">
-        <span>Mini spins (pieces stuck under an overhang, incl. T without 3 corners)</span>
-        <select
-          value={st.miniSpins}
-          onChange={(e) => {
-            trainer.setPlanner({ miniSpins: e.target.value as typeof st.miniSpins })
-            blur(e)
-          }}
-        >
-          <option value="existing">Only into overhangs already in my stack</option>
-          <option value="off">Never (corner T-spins and quads only)</option>
-          <option value="any">Any (may build cages for them)</option>
-        </select>
-      </label>
+      <div className="seg" role="group" aria-label="Spins the planner may use">
+        {(
+          [
+            ['existing', 'All-spin'],
+            ['off', 'T-spins only'],
+          ] as const
+        ).map(([mode, label]) => (
+          <button
+            key={mode}
+            className={st.miniSpins === mode ? 'on' : undefined}
+            aria-pressed={st.miniSpins === mode}
+            onClick={(e) => {
+              trainer.setPlanner({ miniSpins: mode })
+              blur(e)
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       {pl.note && <p className="plan-note">{pl.note}</p>}
 

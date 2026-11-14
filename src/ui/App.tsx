@@ -3,8 +3,8 @@ import { Trainer } from '../app/trainer'
 import { Hud } from './Hud'
 import { SettingsPanel } from './SettingsPanel'
 import { ControlsHelp } from './ControlsHelp'
-import { FinderPanel } from './FinderPanel'
 import { PlanPanel } from './PlanPanel'
+import { HandlingPanel } from './HandlingPanel'
 
 export function App() {
   const [trainer] = useState(() => new Trainer())
@@ -41,8 +41,8 @@ export function App() {
         <aside className="side">
           <PlanPanel trainer={trainer} />
           <Hud trainer={trainer} />
-          <FinderPanel trainer={trainer} />
           <SettingsPanel trainer={trainer} />
+          <HandlingPanel trainer={trainer} />
           <ControlsHelp />
         </aside>
       </main>

@@ -201,6 +201,33 @@ describe('handling', () => {
     expect(Math.min(...pieceCells(game.state.active!).map(([x]) => x))).toBe(0)
   })
 
+  it('handling changes apply live: a longer DAS delays the auto-shift', () => {
+    const game = new Session({ seed: 1, customQueue: ['T'] })
+    const input = new InputController(PRO)
+    input.setHandling({ ...PRO, das: 150 })
+    input.press('moveRight', 0, game)
+    input.update(149, game)
+    expect(game.state.active!.x).toBe(4)
+    input.update(150, game)
+    expect(game.state.active!.x).toBe(7)
+  })
+
+  it('finite soft drop falls (and never locks) even with gravity off', () => {
+    const game = new Session({ seed: 1, customQueue: ['T'] })
+    const input = new InputController({ ...PRO, sdf: 20 })
+    const y0 = game.state.active!.y
+    input.press('softDrop', 0, game)
+    game.tick(1000, input.gravityFactor()) // 20 × 1.2 cells/s for 1 s = 24 cells: reaches the floor
+    expect(game.state.active!.y).toBeLessThan(y0)
+    expect(Math.min(...pieceCells(game.state.active!).map(([, y]) => y))).toBe(0)
+    game.tick(5000, input.gravityFactor())
+    expect(game.state.stats.pieces).toBe(0)
+    input.release('softDrop', 0)
+    const y1 = game.state.active!.y
+    game.tick(1000, input.gravityFactor())
+    expect(game.state.active!.y).toBe(y1)
+  })
+
   it('infinite soft drop reaches the floor without locking', () => {
     const game = new Session({ seed: 1 })
     const input = new InputController(PRO)

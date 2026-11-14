@@ -21,7 +21,7 @@ export interface Controllable {
 type Dir = -1 | 0 | 1
 
 export class InputController {
-  readonly h: Handling
+  h: Handling
   private left = false
   private right = false
   private soft = false
@@ -36,6 +36,11 @@ export class InputController {
 
   constructor(handling: Partial<Handling> = {}) {
     this.h = { ...HANDLING, ...handling }
+  }
+
+  /** Change handling live (held keys keep their state). */
+  setHandling(h: Handling) {
+    this.h = { ...h }
   }
 
   get softHeld() {
