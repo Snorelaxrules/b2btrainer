@@ -1,0 +1,9 @@
+{
+  "name": "Staircase well, J in hand (screenshot 2026-11-19)",
+  "ruleset": "allmini+",
+  "board": ["...#######", "..########", ".#########"],
+  "queue": "JISZJT",
+  "hold": null,
+  "notes": "The old search buried the clean I-in-the-well line under look-alike T-slots.",
+  "expected": { "minChainLength": 1, "expectedClears": ["TSD"] }
+}

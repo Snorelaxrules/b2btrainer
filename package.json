@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "plan": "node --import ./scripts/ts-hooks.mjs scripts/plan.ts"
   },
   "dependencies": {
     "react": "^19.3.1",

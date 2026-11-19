@@ -1,0 +1,9 @@
+{
+  "name": "PLACEHOLDER: replace with a known chain (e.g. fractal) and its exact queue",
+  "ruleset": "allmini+",
+  "board": ["..........", "..........", "#.........", "##........", "#...######", "##.#######"],
+  "queue": "TIOLJ",
+  "hold": null,
+  "b2b": 0,
+  "expected": { "minChainLength": 1, "expectedClears": ["TSD"] }
+}

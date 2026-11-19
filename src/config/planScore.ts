@@ -1,0 +1,106 @@
+/**
+ * Plan score — every feature weight and threshold the planner uses, in one place.
+ *
+ * A plan is scored once, on its END state (the stack after its last clear) plus
+ * its totals. Score = sum of the terms below; positive terms reward, negative
+ * ones penalise. `npm run plan -- <position.json>` prints each plan's per-term
+ * breakdown so these can be tuned without the UI.
+ */
+export interface PlanScoreConfig {
+  // --- totals over the plan ------------------------------------------------------------
+  /** per line of attack sent (spin clears, B2B bonus, combo, surge) */
+  attack: number
+  /** per spin clear in the chain (spins that keep B2B under the active rule) */
+  chainLink: number
+  /** extra per link after the first: two spins in a row beat one */
+  chainBonus: number
+  /** extra per FULL spin (a real T-spin, or any spin under all-spin): minis only keep B2B alive */
+  fullSpin: number
+  /** per piece placed: tempo. Kept small so it never outweighs stack quality */
+  piecesUsed: number
+  /** per B2B break (search prunes these; kept so re-scored plans show it) */
+  b2bBreak: number
+
+  // --- end stack: cleanliness -----------------------------------------------------------
+  /** per empty cell no piece can ever reach (sealed off, or open but unreachable) */
+  sealed: number
+  /** per row holding such a cell: digging it out later is a non-spin clear, so it costs B2B */
+  unsafeDig: number
+  /** per covered empty cell that is not part of any spin slot (an accidental overhang) */
+  overhang: number
+  /** sum of |height steps| between neighbouring columns, ignoring columns a spin slot uses */
+  bumpiness: number
+  /** sum of squared height steps (towers and cliffs), same columns ignored */
+  bumpSquared: number
+
+  // --- end stack: flexibility -----------------------------------------------------------
+  /** per piece type (of 7) with NO clean placement (one that covers no empty cell, under the height limit) */
+  noCleanSpot: number
+  /** per cell a 1-wide well is deeper than `iWellDepth` (only an I fills it cleanly) */
+  iWell: number
+  iWellDepth: number
+  /**
+   * per row whose only gap is one open cell in a 1-wide column: it can only be cleared
+   * by filling that column straight down, never a spin, so it costs B2B unless an I
+   * gets a quad out of it (I-dependency)
+   */
+  iRow: number
+  /** the I is the only piece with a clean placement */
+  iOnly: number
+
+  // --- end stack: what comes next ---------------------------------------------------------
+  /** per slot line for a piece we know is coming (in hold or the queue left after the plan) */
+  slotKnown: number
+  /** per slot line for a piece not yet seen */
+  slotUnseen: number
+  /** a mini slot counts this fraction of a full one */
+  slotMiniFactor: number
+
+  // --- T resource ----------------------------------------------------------------------
+  /** a T kept in hold or within the next `tLookahead` known pieces after the plan */
+  tKept: number
+  tLookahead: number
+  /** per T the plan places without a spin clear */
+  tWasted: number
+
+  // --- safety --------------------------------------------------------------------------
+  /** rows of stack allowed before the danger penalty starts */
+  safetyMargin: number
+  /** per row of max height above `safetyMargin` */
+  danger: number
+  /** hard limit: the search prunes any state taller than this */
+  heightLimit: number
+}
+
+export const PLAN_SCORE: PlanScoreConfig = {
+  attack: 2,
+  chainLink: 6,
+  chainBonus: 4,
+  fullSpin: 4,
+  piecesUsed: 0.4,
+  b2bBreak: 40,
+
+  sealed: 11,
+  unsafeDig: 5,
+  overhang: 3,
+  bumpiness: 0.35,
+  bumpSquared: 0.08,
+
+  noCleanSpot: 2.5,
+  iWell: 3,
+  iWellDepth: 2,
+  iRow: 3,
+  iOnly: 8,
+
+  slotKnown: 3,
+  slotUnseen: 1,
+  slotMiniFactor: 0.5,
+
+  tKept: 3,
+  tLookahead: 3,
+  tWasted: 5,
+
+  safetyMargin: 12,
+  danger: 4,
+  heightLimit: 18,
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Middle well at B2B x40 (screenshot 2026-11-19)",
+  "ruleset": "allmini+",
+  "board": ["##........", "###.....##", "####....##", "#####..###", "#####.####"],
+  "queue": "TZJZSL",
+  "hold": "O",
+  "b2b": 40,
+  "notes": "The suggested plan turned rows 0-1 into rows only an I can clear without breaking B2B."
+}
