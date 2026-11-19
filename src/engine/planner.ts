@@ -727,43 +727,68 @@ export function searchPlans(
     for (const n of beam) {
       const kids = expand(n, req.queue, req.spinRule, req.miniSpins)
       nodes += kids.length
-      children.push(...kids)
+      // a line that ran out of known pieces (e.g. one left in hold) competes as it is:
+      // the piece count is a horizon, not a quota
+      if (kids.length) children.push(...kids)
+      else if (n.steps.length) children.push(n)
     }
     if (!children.length) break
-    // stage 1: rank by the optimistic score (cheap slot shape check)
+    // Rank by the optimistic score (cheap slot-shape check), then confirm slots and
+    // pockets with the real move search lazily, best first. Confirming only ever
+    // lowers a score (the optimistic one is an upper bound), so a confirmed node is
+    // admitted once no unconfirmed node could still beat it. (Confirming a fixed
+    // front-runner set instead let inflated look-alikes crowd out clean lines.)
     children.sort((a, b) => b.score - a.score)
-    // stage 2: confirm slots and pockets by real move search for the front-runners
-    // only (distinct boards first: different orders often reach the same board), then re-rank
-    const front: Node[] = []
-    const frontKeys = new Set<string>()
-    for (const c of children) {
-      if (front.length >= Math.max(req.beam, 40)) break
-      const k = boardKey(c)
-      if (frontKeys.has(k)) continue
-      frontKeys.add(k)
-      front.push(c)
-    }
-    for (const c of front) confirmSlot(c, req.queue, memo)
-    front.sort((a, b) => b.score - a.score)
-    const rest = children.filter((c) => !c.eval.confirmed)
-    children.length = 0
-    children.push(...front, ...rest)
-    // keep the best nodes, but no first move may take more than a third of the
-    // beam, so alternative plans survive to the end
+    // no first move may take more than a third of the beam, so alternatives survive
     const seen = new Set<string>()
     const perFirst = new Map<string, number>()
     const cap = Math.max(2, Math.ceil(req.beam / 3))
+    const pool: Node[] = [] // confirmed, best last
+    const insert = (c: Node) => {
+      let lo = 0
+      let hi = pool.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (pool[mid].score <= c.score) lo = mid + 1
+        else hi = mid
+      }
+      pool.splice(lo, 0, c)
+    }
     beam = []
-    for (const c of children) {
-      const k = boardKey(c)
-      if (seen.has(k)) continue
-      const used = perFirst.get(c.first) ?? 0
-      if (used >= cap) continue
-      seen.add(k)
-      perFirst.set(c.first, used + 1)
-      confirmSlot(c, req.queue, memo) // no unconfirmed slot ever reaches a plan
-      beam.push(c)
-      if (beam.length >= req.beam) break
+    let i = 0
+    // confirmation is the expensive part (a move search per piece type): past this
+    // budget, fall back to admitting in optimistic order and confirming on admission
+    let budget = Math.max(req.beam, 40) * 3
+    while (beam.length < req.beam) {
+      const nextOpt = i < children.length ? (budget > 0 ? children[i].score : -Infinity) : -Infinity
+      if (budget <= 0 && !pool.length && i < children.length) {
+        const c = children[i++]
+        const k = boardKey(c)
+        if (seen.has(k)) continue
+        const used = perFirst.get(c.first) ?? 0
+        if (used >= cap) continue
+        seen.add(k)
+        perFirst.set(c.first, used + 1)
+        confirmSlot(c, req.queue, memo)
+        beam.push(c)
+        continue
+      }
+      if (pool.length && pool[pool.length - 1].score >= nextOpt) {
+        const c = pool.pop() as Node
+        const k = boardKey(c)
+        if (seen.has(k)) continue
+        const used = perFirst.get(c.first) ?? 0
+        if (used >= cap) continue
+        seen.add(k)
+        perFirst.set(c.first, used + 1)
+        beam.push(c)
+      } else if (i < children.length) {
+        const c = children[i++]
+        if (seen.has(boardKey(c))) continue
+        if (!c.eval.confirmed) budget--
+        confirmSlot(c, req.queue, memo) // no unconfirmed slot ever reaches a plan
+        insert(c)
+      } else break
     }
     plans = pickPlans(beam, top, start, tally, req.board)
     onProgress?.({ depthDone: d, plans, nodes, ms: performance.now() - t0, discarded: tally.discarded })

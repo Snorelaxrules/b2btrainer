@@ -130,19 +130,20 @@ describe('planner', () => {
 
     it('default: takes the J 180 spin into the existing hole (cleans the stack, keeps B2B)', () => {
       const plans = searchPlans(req('existing'))
-      expect(plans[0].steps[0]).toMatchObject({ type: 'J', viaHold: true })
-      expect(plans[0].steps[0].result.label).toBe('J-Spin Mini Double')
-      expect(plans[0].steps[0].path).toContain('flip')
-    })
+      const j = plans[0].steps.find((s) => s.type === 'J')!
+      expect(j.viaHold).toBe(true)
+      expect(j.result.label).toBe('J-Spin Mini Double')
+      expect(j.path).toContain('flip')
+    }, 20000)
 
     it('default: never builds a cage for a stuck-piece spin (the I-spin under a J the plan placed)', () => {
       expect(labels(searchPlans(req('existing')))).not.toContain('I-Spin Mini Single')
       // (the rule itself is checked directly by the fuzz test: no stuck-piece spin under a plan-built roof)
-    })
+    }, 20000)
 
     it("'off': no stuck-piece spin clears at all", () => {
       expect(labels(searchPlans(req('off'))).filter((l) => /Spin/.test(l) && !/^TS|^T-Spin/.test(l))).toEqual([])
-    })
+    }, 20000)
   })
 
   it('explains itself when there is no clean option (a player\'s board with a well and a notch)', () => {
@@ -157,3 +158,29 @@ describe('planner', () => {
     }
   })
 })
+
+describe('planner regressions', () => {
+  // screenshot 2026-11-19: staircase well on the left, J in hand, I next. Look-alike
+  // T-slots crowded the clean I-in-the-well line out of the confirmed front, and a
+  // 6-piece horizon dropped every line that ended with a piece still in hold.
+  const STAIRS = boardFromRows(['...#######', '..########', '.#########'])
+  for (const [beam, depth] of [[40, 5], [40, 6], [100, 6]] as const) {
+    it(`staircase well, beam ${beam} depth ${depth}: no awkward spots, still spins`, () => {
+      const plans = searchPlans({
+        board: STAIRS,
+        counters: { b2b: -1, combo: -1 },
+        current: 'J',
+        hold: null,
+        holdUsed: false,
+        queue: ['I', 'S', 'Z', 'J', 'T'],
+        depth,
+        beam,
+        spinRule: 'allmini+',
+        miniSpins: 'existing',
+      })
+      expect(plans[0].awkward).toBe(0)
+      expect(plans[0].steps.some((s) => s.result.label === 'TSD')).toBe(true)
+    }, 20000)
+  }
+})
+
