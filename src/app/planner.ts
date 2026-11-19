@@ -16,24 +16,22 @@
  */
 import type { SpinRule } from '../config/scoring'
 import { type GameState, pieceCells } from '../engine/game'
-import { type MiniSpinMode, type Plan, type PlanRequest, type Target, completePlan } from '../engine/planner'
+import { type Plan, type PlanRequest, type Target, completePlan } from '../engine/planner'
 import { type Board, type Cell, HEIGHT, WIDTH } from '../engine/game'
 import { verifyPlan } from '../engine/verify'
 import type { WorkerIn, WorkerOut } from '../search/planner.worker'
 
 export interface PlannerSettings {
-  /** pieces to plan, 1–6 */
+  /** most pieces a plan may use, 1–6 */
   depth: number
-  /** beam width */
-  beam: number
-  /** "stuck piece" mini spins: off / only into overhangs already on the board / any */
-  miniSpins: MiniSpinMode
+  /** search time budget in ms */
+  budgetMs: number
 }
 
-export const BEAM_PRESETS = [
-  { label: 'Fast', beam: 40 },
-  { label: 'Normal', beam: 100 },
-  { label: 'Deep', beam: 250 },
+export const BUDGET_PRESETS = [
+  { label: 'Quick', ms: 200 },
+  { label: 'Normal', ms: 600 },
+  { label: 'Deep', ms: 2000 },
 ]
 
 const cellsKey = (cells: readonly (readonly [number, number])[]) =>
@@ -58,7 +56,8 @@ export class PlannerController {
   /** committed to plans[0] */
   following = false
   running = false
-  depthDone = 0
+  /** search passes finished (each wider than the last) */
+  pass = 0
   ms = 0
   /** why the planner last switched off or replanned, shown in the panel */
   note = ''
@@ -102,9 +101,8 @@ export class PlannerController {
       holdUsed: s.holdUsed,
       queue: s.queue.slice(0, s.rules.previews),
       depth: this.settings.depth,
-      beam: this.settings.beam,
+      budgetMs: this.settings.budgetMs,
       spinRule,
-      miniSpins: this.settings.miniSpins,
     }
   }
 
@@ -178,8 +176,12 @@ export class PlannerController {
         plan.steps.filter((_, j) => j !== i).map((st) => ({ type: st.type, cells: st.cells })),
       )
       if (rest && !rest.length) {
-        const pay = plan.steps[plan.payoff]
-        this.off(pay ? `Plan complete: ${pay.result.label} +${pay.result.attack}. Press P for the next one.` : 'Plan complete.')
+        const pays = plan.payoffs.map((j) => plan.steps[j].result)
+        this.off(
+          pays.length
+            ? `Plan complete: ${pays.map((r) => `${r.label} +${r.attack}`).join(' → ')}. Press P for the next one.`
+            : 'Setup complete. Press P for the next step.',
+        )
         return
       }
       if (rest && this.lock(after, spinRule, rest)) return
@@ -243,7 +245,7 @@ export class PlannerController {
     this.following = false
     this.plans = []
     this.selected = 0
-    this.depthDone = 0
+    this.pass = 0
     this.discardedThisSearch = 0
     this.note = ''
     const req = this.requestFor(s, spinRule)
@@ -278,14 +280,13 @@ export class PlannerController {
     this.discardedTotal += m.discarded - this.discardedThisSearch
     this.discardedThisSearch = m.discarded
     if (m.kind === 'progress') {
-      this.depthDone = m.depthDone
+      this.pass = m.pass
       this.ms = m.ms
       if (m.plans.length) this.plans = m.plans
     } else {
       this.plans = m.plans
       this.ms = m.ms
       this.running = false
-      this.depthDone = this.settings.depth
       if (!m.plans.length) this.note = 'No playable plan found from here.'
       if (this.reqState) this.remember(this.reqState)
     }

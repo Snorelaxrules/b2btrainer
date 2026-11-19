@@ -144,3 +144,11 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12
 .slider input[type=range] { width: 100%; accent-color: var(--accent); padding: 0; }
 .slider-value { font-variant-numeric: tabular-nums; text-align: right; }
 .slider-value small { color: var(--muted); }
+.breakdown { margin: 8px 0 4px; font-size: 12px; }
+.breakdown summary { cursor: pointer; color: var(--muted); }
+.breakdown summary:hover { color: var(--text); }
+.breakdown table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.breakdown td { padding: 2px 4px; border-top: 1px solid var(--panel-edge); vertical-align: top; }
+.breakdown td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.breakdown td.pos { color: #7ee08a; }
+.breakdown td.neg { color: #f87171; }

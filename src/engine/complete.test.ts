@@ -10,7 +10,7 @@ const key = (cells: readonly (readonly [number, number])[]) => cells.map(([x, y]
 const TSD = G.boardFromRows(['#.........', '##........', '#...######', '##.#######'])
 
 function req(over: Partial<PlanRequest>): PlanRequest {
-  return { board: TSD, counters: { b2b: 2, combo: -1 }, current: 'L', hold: null, holdUsed: false, queue: ['J', 'T', 'O', 'S', 'Z'], depth: 5, beam: 60, spinRule: 'allmini+', ...over }
+  return { board: TSD, counters: { b2b: 2, combo: -1 }, current: 'L', hold: null, holdUsed: false, queue: ['J', 'T', 'O', 'S', 'Z'], depth: 5, spinRule: 'allmini+', ...over }
 }
 
 describe('finishing a setup out of order', () => {

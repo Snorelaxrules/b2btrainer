@@ -12,7 +12,9 @@ export interface PlanScoreConfig {
   attack: number
   /** per spin clear in the chain (spins that keep B2B under the active rule) */
   chainLink: number
-  /** extra per link after the first: two spins in a row beat one */
+  /** a mini spin counts as this fraction of a link (it keeps B2B but sends little) */
+  chainMiniFactor: number
+  /** extra per link after the first (link weights: full 1, mini `chainMiniFactor`): two spins in a row beat one */
   chainBonus: number
   /** extra per FULL spin (a real T-spin, or any spin under all-spin): minis only keep B2B alive */
   fullSpin: number
@@ -75,9 +77,10 @@ export interface PlanScoreConfig {
 export const PLAN_SCORE: PlanScoreConfig = {
   attack: 2,
   chainLink: 6,
-  chainBonus: 4,
+  chainMiniFactor: 0.5,
+  chainBonus: 3,
   fullSpin: 4,
-  piecesUsed: 0.4,
+  piecesUsed: 1.5,
   b2bBreak: 40,
 
   sealed: 11,
@@ -103,4 +106,33 @@ export const PLAN_SCORE: PlanScoreConfig = {
   safetyMargin: 12,
   danger: 4,
   heightLimit: 18,
+}
+
+/** Search settings (defaults; the UI overrides depth and budget). */
+export interface PlanSearchConfig {
+  /** wall-clock budget per search in ms; the best plans found by then are returned */
+  budgetMs: number
+  /** most spin clears one plan may chain */
+  maxChain: number
+  /** beam width of the first pass; each later pass triples it (iterative widening) */
+  beamStart: number
+  /** stop widening past this */
+  beamMax: number
+  /**
+   * Partial plans are ranked by what they achieved plus the spin slots their
+   * stack offers the pieces still coming, minus this fraction of the end-stack
+   * penalties as a light tie-breaker (the full penalties apply only at the end).
+   */
+  partialStack: number
+  /** plans fully scored per pass, per plan shown */
+  finalists: number
+}
+
+export const PLAN_SEARCH: PlanSearchConfig = {
+  budgetMs: 200,
+  maxChain: 3,
+  beamStart: 16,
+  beamMax: 432,
+  partialStack: 0.3,
+  finalists: 4,
 }

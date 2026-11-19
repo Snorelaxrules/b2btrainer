@@ -1,0 +1,10 @@
+{
+  "name": "Synthetic: S-spin single leaves the roof of a TSD",
+  "ruleset": "allmini+",
+  "board": ["#.........", "#..#######", "..........", "#...######", "##.#######"],
+  "queue": "STOIL",
+  "hold": null,
+  "b2b": 3,
+  "notes": "The S spins into the gap under the shelf; its upper cells clear with that row and its lower cells become the TSD overhang.",
+  "expected": { "minChainLength": 2, "expectedClears": ["S-Spin Mini Single", "TSD"] }
+}

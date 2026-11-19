@@ -3,26 +3,26 @@
  * end stack and the per-term score table. Pure (no fs / process): the CLI in
  * scripts/plan.ts prints what this returns.
  */
-import { PLAN_SCORE, type PlanScoreConfig } from '../config/planScore'
 import { type Board, clearLines, placeOnBoard } from '../engine/game'
 import { MOVE_LABEL } from '../engine/movegen'
-import { type PlanScore, boardText, formatScore, remainingPieces, scorePlan } from '../engine/planScore'
+import { boardText, formatScore } from '../engine/planScore'
 import { type Plan, type PlanRequest, searchPlans } from '../engine/planner'
 import type { Position } from './position'
 
 export interface RunOptions {
   depth?: number
+  /** first-pass beam */
   beam?: number
+  /** widest pass */
+  beamMax?: number
+  /** ms; default: no time limit (deterministic: every pass up to beamMax) */
+  budget?: number
   top?: number
-  cfg?: PlanScoreConfig
 }
 
 export interface PlanReport {
   plan: Plan
-  score: PlanScore
   endBoard: Board
-  /** the search's own rank (1-based) */
-  searchRank: number
 }
 
 export interface PositionReport {
@@ -39,33 +39,28 @@ export function requestFor(p: Position, opts: RunOptions = {}): PlanRequest {
     hold: p.hold,
     holdUsed: p.holdUsed,
     queue: p.queue,
-    depth: opts.depth ?? Math.min(6, 1 + p.queue.length),
-    beam: opts.beam ?? 100,
+    depth: opts.depth,
+    beam: opts.beam,
+    beamMax: opts.beamMax,
+    budgetMs: opts.budget ?? Infinity,
     spinRule: p.ruleset,
-    miniSpins: p.ruleset === 'tspin' ? 'off' : 'existing',
   }
 }
 
-/** Run the search, score each plan on its end state, best score first. */
+/** Run the search (plans come back best score first, each with its term breakdown). */
 export function analysePosition(p: Position, opts: RunOptions = {}): PositionReport {
   const req = requestFor(p, opts)
   const t0 = performance.now()
   const plans = searchPlans(req, undefined, opts.top ?? 3)
   const ms = performance.now() - t0
-  const reports = plans.map((plan, i): PlanReport => {
+  const reports = plans.map((plan): PlanReport => {
     let b = p.board
     for (const st of plan.steps) {
       b = placeOnBoard(b, st.piece)
       clearLines(b)
     }
-    const remaining = remainingPieces(
-      { current: p.current, hold: p.hold, queue: p.queue },
-      plan.steps.map((s) => s.type),
-    )
-    const score = scorePlan({ steps: plan.steps, endBoard: b, remaining, rule: p.ruleset }, opts.cfg ?? PLAN_SCORE)
-    return { plan, score, endBoard: b, searchRank: i + 1 }
+    return { plan, endBoard: b }
   })
-  reports.sort((a, b) => b.score.total - a.score.total)
   return { position: p, reports, ms }
 }
 
@@ -87,15 +82,17 @@ export function formatPositionReport(r: PositionReport, opts: { all?: boolean } 
   out.push('', ...p.rows.map((row) => `    ${row}`))
   if (!r.reports.length) out.push('', '  (no plans)')
   r.reports.forEach((rep, i) => {
-    out.push('', `--- Plan ${i + 1} · score ${rep.score.total.toFixed(2)} · search rank ${rep.searchRank}`, `    ${rep.plan.summary}`)
+    const pl = rep.plan
+    out.push('', `--- Plan ${i + 1} · ${pl.kind} · score ${pl.score.toFixed(2)} · chain ${pl.chain} · attack ${pl.attack} · ${pl.steps.length} pieces`, `    ${pl.summary}`)
     const steps = rep.plan.steps.map((s) => {
       const cols = [...new Set(s.cells.map(([x]) => x))].sort((a, b) => a - b)
       const keys = [...(s.viaHold ? ['Hold'] : []), ...s.path.map((m) => MOVE_LABEL[m]), 'Drop'].join(' ')
       const clear = s.result.lines ? `  [${s.result.label}${s.result.attack ? ` +${s.result.attack}` : ''}]` : ''
-      return `${String(s.n).padStart(2)}. ${s.viaHold ? 'hold→' : ''}${s.type}  rot ${ROT[s.piece.rot]} cols ${cols[0]}–${cols[cols.length - 1]}  ${keys}${clear}`
+      const note = s.note ? `  (${s.note})` : ''
+      return `${String(s.n).padStart(2)}. ${s.viaHold ? 'hold→' : ''}${s.type}  rot ${ROT[s.piece.rot]} cols ${cols[0]}–${cols[cols.length - 1]}  ${keys}${clear}${note}`
     })
     out.push(...beside(steps, ['end stack:', ...boardText(rep.endBoard)]).map((l) => `  ${l}`))
-    out.push('', formatScore(rep.score, opts.all))
+    out.push('', formatScore({ total: pl.score, terms: pl.terms }, opts.all))
   })
   return out.join('\n')
 }

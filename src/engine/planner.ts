@@ -1,15 +1,29 @@
 /**
- * Lookahead planner: beam search over the current piece, hold and the visible
- * queue for placement sequences that build and cash in spins without breaking
- * back-to-back. Pure (no DOM); runs inside a Web Worker in the app.
+ * Spin-chain planner: searches sequences of placements (with hold) over the
+ * KNOWN pieces only (piece in hand, hold, visible queue) that complete one or
+ * more B2B-keeping spin clears in a row while keeping the stack clean.
  *
- * Each search node is a board + B2B/combo counters + which pieces are left.
- * Children are every reachable placement (spin finder) of the piece in hand,
- * and of the hold piece (or next piece if hold is empty) via hold.
- * Nodes are ranked by `score`: what the plan has achieved so far plus a static
- * evaluation of the board it leaves (holes, bumpiness, height, open T-slots).
+ * - Nodes are full game states: board, piece in hand, hold (+ used flag), queue
+ *   index, B2B and combo. Children are every reachable placement (real move
+ *   search, SRS+ kicks) of the piece in hand, or of the hold / next piece via hold.
+ * - Hard prunes only: a placement that breaks B2B, leaves the stack above the
+ *   height limit, or seals off a new hole is never part of a plan.
+ * - Partial plans are ranked by what they achieved, plus the spin slots their
+ *   stack offers the pieces still coming, minus a light stack tie-breaker.
+ * - A plan is complete right after a B2B-keeping clear (spin or quad); it may
+ *   go on to chain up to `maxChain` spins. Complete plans are scored on their
+ *   END stack plus totals (planScore.ts). With no clear in reach, the best
+ *   setups (stacks with a slot ready for a known piece) are returned instead.
+ * - Iterative widening under a time budget: a narrow pass first (always
+ *   finished), then wider passes until the budget runs out; the best plans so
+ *   far are reported after each pass. A transposition key drops repeat states.
+ * - Every plan returned has been replayed through the real engine (verify.ts).
+ *
+ * Pure (no DOM); runs in a Web Worker in the app.
  */
+import { PLAN_SCORE, PLAN_SEARCH, type PlanScoreConfig, type PlanSearchConfig } from '../config/planScore'
 import type { SpinRule } from '../config/scoring'
+import { classifyPockets, heights, sealedCells, sealedHoles } from './features'
 import { type Candidate, findPlacements } from './finder'
 import {
   type ActivePiece,
@@ -21,15 +35,15 @@ import {
   WIDTH,
   clearLines,
   newGame,
-  pieceCells,
   placeOnBoard,
   spawnPiece,
 } from './game'
-import { type Move, reachablePlacements } from './movegen'
+import type { Move } from './movegen'
+import { type PlanScore, type ScoreTerm, scorePlan } from './planScore'
 import { PIECES, type PieceType, SHAPES } from './pieces'
-import { type ClearResult, type Counters, detectSpin, spinBasis } from './scoring'
+import type { ClearResult, Counters } from './scoring'
+import { slots } from './slots'
 import { verifyPlan } from './verify'
-import { classifyPockets, heights, sealedHoles } from './features'
 
 export interface PlanRequest {
   board: Board
@@ -39,27 +53,18 @@ export interface PlanRequest {
   holdUsed: boolean
   /** upcoming pieces (the visible previews) */
   queue: readonly PieceType[]
-  /** pieces to place, 1–6 */
-  depth: number
-  /** nodes kept per depth */
-  beam: number
+  /** the active spin rule: decides which placements are spins that keep B2B */
   spinRule: SpinRule
-  /**
-   * Line clears with "stuck piece" spins: any piece (T included) that only counts as a
-   * spin because it can't move (All-Mini+ / all-spin), as opposed to corner T-spins.
-   *  - 'off': never plan them
-   *  - 'existing' (default): only under an overhang that is already on the board, never
-   *    one the plan's own pieces built (those are the odd cages)
-   *  - 'any': allow them
-   */
-  miniSpins?: MiniSpinMode
-}
-
-export type MiniSpinMode = 'off' | 'existing' | 'any'
-
-export interface FollowStep {
-  piece: ActivePiece
-  viaHold: boolean
+  /** most pieces a plan may place (default: every known piece) */
+  depth?: number
+  /** time budget in ms (default PLAN_SEARCH.budgetMs; Infinity = run every pass up to beamMax) */
+  budgetMs?: number
+  /** first-pass beam width (default PLAN_SEARCH.beamStart) */
+  beam?: number
+  /** widest pass (default PLAN_SEARCH.beamMax) */
+  beamMax?: number
+  /** most spin clears per plan (default PLAN_SEARCH.maxChain) */
+  maxChain?: number
 }
 
 export interface PlanStep {
@@ -72,36 +77,34 @@ export interface PlanStep {
   result: ClearResult
   /** cells in the coordinates of the board the plan started from (earlier line clears undone) */
   cells: Cell[]
-  /** sealed holes on the board right after this step */
-  sealed: number
-  /** why this step costs something, when it does (e.g. "leaves a pocket only an L spin can fill") */
+  /** why this step costs something, when it does (e.g. "leaves a hole no piece can reach") */
   note?: string
 }
 
 export interface Plan {
+  /** 'chain': ends with a B2B-keeping clear; 'setup': no clear in reach, builds toward one */
+  kind: 'chain' | 'setup'
   steps: PlanStep[]
-  /** indices of the steps that cash in (B2B-keeping clears: spins, quads) */
+  /** indices of the steps that clear B2B-safely (spins, quads) */
   payoffs: number[]
-  /** the biggest of those, or -1 */
-  payoff: number
+  /** spin clears in the plan */
+  chain: number
   attack: number
-  /** B2B-keeping clears (spins, quads) in the plan */
-  b2bClears: number
-  breaks: number
-  /** T-slot left open at the end (lines a T-spin there would clear), 0 if none */
-  slotAfter: number
-  /** sealed holes the shown steps add (negative: they open some up) */
-  newSealed: number
-  /** awkward pockets (spin-only or unreachable) the shown steps leave behind */
-  awkward: number
+  /** total of the score terms */
   score: number
+  /** per-feature contributions (src/config/planScore.ts) */
+  terms: ScoreTerm[]
+  /** awkward cells (unreachable or spin-only) the plan leaves that weren't there before */
+  awkward: number
   /** the plan the player was already following */
   followed?: boolean
   summary: string
 }
 
 export interface PlanProgress {
-  depthDone: number
+  /** passes finished (each wider than the last) */
+  pass: number
+  beam: number
   plans: Plan[]
   nodes: number
   ms: number
@@ -112,6 +115,8 @@ export interface PlanProgress {
 export interface SearchOptions {
   /** replay every plan through the real engine before returning it (default true) */
   verify?: boolean
+  score?: PlanScoreConfig
+  search?: PlanSearchConfig
 }
 
 /**
@@ -128,46 +133,8 @@ export function stateFromRequest(req: PlanRequest): GameState {
     active: spawnPiece(req.current),
     hold: req.hold,
     holdUsed: req.holdUsed,
-    // pad past the known pieces so the engine never spawns from an empty queue
-    // after a plan that uses every visible piece (it can't depend on the padding:
-    // verification checks each step's piece type)
     queue: [...req.queue, ...PIECES],
   }
-}
-
-// --- weights ------------------------------------------------------------------------
-
-export const WEIGHTS = {
-  attack: 2,
-  /** B2B-keeping clears: real T-spins are what we're training, minis only keep the chain alive */
-  fullSpinClear: 8,
-  /** per line cleared by a B2B-keeping clear: cleaning the stack without losing the chain */
-  b2bLine: 3,
-  quadClear: 6,
-  miniSpinClear: 2,
-  /** unused while breaks are pruned outright (see expand); kept for experiments */
-  b2bBreak: 30,
-  /** plain line clear with no streak to lose: wasteful but harmless */
-  plainClear: 2,
-  /** a cell sealed off from the open area (unreachable without clearing lines above it) */
-  sealed: 11,
-  /** a covered gap a piece can slide or drop into (overhang, tuck): needed for spins, so cheap */
-  holes: 2,
-  /** a covered pocket only a spin can fill: a setup the plan must actually use, else a liability */
-  spinPocket: 9,
-  bumpiness: 0.35,
-  /** squared height steps between neighbours: towers and cliffs cost far more than gentle slopes */
-  bumpSquared: 0.08,
-  /** per cell a 1-wide well is deeper than 2 (only an I fills those): minimise I dependency */
-  iWell: 3,
-  height: 0.15,
-  /** extra per row of max height above `dangerRow` */
-  danger: 3,
-  dangerRow: 12,
-  /** open T-slot, per line it would clear, when a T is still coming */
-  tSlot: 5,
-  /** open T-slot when no T is left in the horizon (still worth something) */
-  tSlotNoT: 2,
 }
 
 const cellSetKey = (cells: readonly Cell[]) =>
@@ -176,15 +143,69 @@ const cellSetKey = (cells: readonly Cell[]) =>
     .sort((a, b) => a - b)
     .join(',')
 
-// --- fast board features ------------------------------------------------------------------
+// --- cheap stack features (every child) ---------------------------------------------------
 
-function filled(board: Board, x: number, y: number) {
+interface Cheap {
+  covered: number
+  sealed: number
+  bump: number
+  bumpSq: number
+  iWell: number
+  iRows: number
+  maxHeight: number
+}
+
+function cheapEval(board: Board, cfg: PlanScoreConfig): Cheap {
+  const h = heights(board)
+  let covered = 0
+  for (let x = 0; x < WIDTH; x++) for (let y = 0; y < h[x]; y++) if (!board[y * WIDTH + x]) covered++
+  let bump = 0
+  let bumpSq = 0
+  for (let x = 0; x + 1 < WIDTH; x++) {
+    const d = Math.abs(h[x] - h[x + 1])
+    bump += d
+    bumpSq += d * d
+  }
+  let iWell = 0
+  for (let x = 0; x < WIDTH; x++) {
+    const depth = Math.min(x > 0 ? h[x - 1] : Infinity, x < WIDTH - 1 ? h[x + 1] : Infinity) - h[x]
+    if (depth > cfg.iWellDepth && depth !== Infinity) iWell += depth - cfg.iWellDepth
+  }
+  const maxHeight = Math.max(...h)
+  let iRows = 0
+  for (let y = 0; y < maxHeight; y++) {
+    let gaps = 0
+    let gap = -1
+    for (let x = 0; x < WIDTH && gaps < 2; x++)
+      if (!board[y * WIDTH + x]) {
+        gaps++
+        gap = x
+      }
+    if (gaps === 1 && y >= h[gap]) iRows++
+  }
+  return { covered, sealed: covered ? sealedHoles(board, h) : 0, bump, bumpSq, iWell, iRows, maxHeight }
+}
+
+function tieBreak(c: Cheap, cfg: PlanScoreConfig, s: PlanSearchConfig): number {
+  return (
+    s.partialStack *
+    (c.covered * cfg.overhang +
+      c.bump * cfg.bumpiness +
+      c.bumpSq * cfg.bumpSquared +
+      c.iWell * cfg.iWell +
+      c.iRows * cfg.iRow +
+      Math.max(0, c.maxHeight - cfg.safetyMargin) * cfg.danger)
+  )
+}
+
+// --- optimistic T-slot shape (no move search) --------------------------------------------
+
+function filledAt(board: Board, x: number, y: number) {
   if (x < 0 || x >= WIDTH || y < 0) return true
   if (y >= HEIGHT) return false
   return board[y * WIDTH + x] !== 0
 }
-
-const T_FRONT: Record<number, [number, number]> = { 0: [0, 1], 1: [1, 2], 2: [2, 3], 3: [3, 0] }
+const T_FRONT: Record<number, [number, number]> = { 1: [1, 2], 2: [2, 3], 3: [3, 0] }
 const T_CORNERS: [number, number][] = [
   [0, 0],
   [2, 0],
@@ -192,160 +213,71 @@ const T_CORNERS: [number, number][] = [
   [0, 2],
 ]
 
-/**
- * Lines a full T-spin would clear in the best open T-slot (0 if none).
- *
- * Two passes. A cheap shape check near the surface finds candidate spots (3
- * corners, both facing corners, a roof over at least one cell, T resting, ≥1
- * line). Then a real move search (SRS+ kicks from spawn) confirms a T can
- * actually rotate into one of them and score a FULL spin. Without the second
- * pass the planner chased "slots" no T could ever reach.
- */
-export function tSlotLines(board: Board, h: number[] = heights(board)): number {
-  const cands = tSlotCandidates(board, h)
-  if (!cands.size) return 0
+/** Lines the best T-spin-shaped spot would clear, by shape alone (an upper bound for the real check). */
+function tShapeLines(board: Board): number {
+  const h = heights(board)
   let best = 0
-  for (const r of reachablePlacements(board, 'T', undefined, { paths: false })) {
-    if (!r.piece.rotated) continue
-    const lines = cands.get(cellSetKey(pieceCells(r.piece)))
-    if (lines && lines > best && detectSpin(board, r.piece, 'tspin') === 'full') best = lines
-  }
-  return best
-}
-
-/** Shape-only T-slot candidates: covered-cells key → lines a T-spin there would clear. */
-function tSlotCandidates(board: Board, h: number[]): Map<string, number> {
-  const found = new Map<string, number>()
   for (let rot = 1; rot <= 3; rot++) {
     const cells = SHAPES.T[rot]
     for (let bx = -1; bx < WIDTH - 1; bx++) {
       let lo = Infinity
       let hi = 0
-      for (let c = bx; c < bx + 3; c++) {
-        if (c < 0 || c >= WIDTH) continue
+      for (let c = Math.max(0, bx); c < Math.min(WIDTH, bx + 3); c++) {
         lo = Math.min(lo, h[c])
         hi = Math.max(hi, h[c])
       }
       for (let by = Math.max(1, lo - 2); by <= Math.min(VISIBLE, hi + 1); by++) {
-        // fits?
-        let ok = true
-        for (const [cx, cy] of cells) {
-          if (filled(board, bx + cx, by - cy)) {
-            ok = false
-            break
-          }
-        }
-        if (!ok) continue
-        // resting?
-        let grounded = false
-        for (const [cx, cy] of cells) if (filled(board, bx + cx, by - cy - 1)) grounded = true
-        if (!grounded) continue
-        // corners
-        const f = T_CORNERS.map(([dx, dy]) => filled(board, bx + dx, by - dy))
+        if (cells.some(([cx, cy]) => filledAt(board, bx + cx, by - cy))) continue
+        if (!cells.some(([cx, cy]) => filledAt(board, bx + cx, by - cy - 1))) continue
+        const f = T_CORNERS.map(([dx, dy]) => filledAt(board, bx + dx, by - dy))
         if (f.filter(Boolean).length < 3) continue
         const [a, b] = T_FRONT[rot]
         if (!f[a] || !f[b]) continue
-        // roof: something above one of its cells (otherwise it is just a hole you can drop into)
-        let roof = false
-        for (const [cx, cy] of cells) {
-          const x = bx + cx
-          for (let y = by - cy + 1; y < h[x] && !roof; y++) if (filled(board, x, y)) roof = true
-        }
-        if (!roof) continue
-        // lines it would clear
         let lines = 0
-        const rows = new Set(cells.map(([, cy]) => by - cy))
-        for (const y of rows) {
+        for (const y of new Set(cells.map(([, cy]) => by - cy))) {
           let full = true
-          for (let x = 0; x < WIDTH && full; x++) {
-            if (filled(board, x, y)) continue
-            if (!cells.some(([cx, cy]) => bx + cx === x && by - cy === y)) full = false
-          }
+          for (let x = 0; x < WIDTH && full; x++)
+            if (!filledAt(board, x, y) && !cells.some(([cx, cy]) => bx + cx === x && by - cy === y)) full = false
           if (full) lines++
         }
-        if (lines) found.set(cellSetKey(cells.map(([cx, cy]): Cell => [bx + cx, by - cy])), lines)
+        if (lines > best) best = lines
       }
     }
   }
-  return found
+  return best
 }
 
-export interface BoardEval {
-  /** covered but still open gaps, not counting a confirmed slot's own cavity */
-  holes: number
-  /** every empty cell under a block in its column */
-  rawHoles: number
-  /** of those, cells sealed off from the open area, or open but unreachable by any piece */
-  sealed: number
-  /** open pockets only a spin can fill (after the reachability check) */
-  spinPockets: number
-  /** slot lines: optimistic (shape only) until `confirmed`, then reachability-checked */
+// --- search nodes ------------------------------------------------------------------------------
+
+interface Node {
+  board: Board
+  counters: Counters
+  /** piece in hand, null when the known queue ran out */
+  current: PieceType | null
+  hold: PieceType | null
+  canHold: boolean
+  /** next unread queue index */
+  next: number
+  steps: PlanStep[]
+  /** original-board row for each row of `board` (to map cells back) */
+  rows: number[]
+  attack: number
+  chain: number
+  full: number
+  tWasted: number
+  cheap: Cheap
+  /** achieved totals as score points */
+  achieved: number
+  /** spin-slot value for the pieces still known to come (optimistic until confirmed) */
+  potential: number
   confirmed: boolean
-  bumpiness: number
-  /** sum of squared neighbour height differences */
-  bumpSquared: number
-  /** total depth beyond 2 of 1-wide wells (walls count as high) */
-  iWells: number
-  height: number
-  maxHeight: number
-  slot: number
+  rank: number
+  /** identifies the first placement (diversity) */
+  first: string
+  hash: number
 }
 
-export function evaluateBoard(board: Board): BoardEval {
-  const h = heights(board)
-  let holes = 0
-  for (let x = 0; x < WIDTH; x++) for (let y = 0; y < h[x]; y++) if (!board[y * WIDTH + x]) holes++
-  let bump = 0
-  let bumpSquared = 0
-  for (let x = 0; x < WIDTH - 1; x++) {
-    const d = h[x] - h[x + 1]
-    bump += Math.abs(d)
-    bumpSquared += d * d
-  }
-  // wells deeper than 2: a J/L can fill 3 deep only with luck, deeper needs an I
-  let iWells = 0
-  for (let x = 0; x < WIDTH; x++) {
-    const l = x === 0 ? Infinity : h[x - 1]
-    const r = x === WIDTH - 1 ? Infinity : h[x + 1]
-    const depth = Math.min(l, r) - h[x]
-    if (depth > 2 && depth !== Infinity) iWells += depth - 2
-  }
-  const height = h.reduce((a, b) => a + b, 0)
-  const sealed = holes ? sealedHoles(board, h) : 0
-  // optimistic: the best shape-only candidate. confirmSlot() replaces it with the reachable value.
-  let slot = 0
-  for (const v of tSlotCandidates(board, h).values()) if (v > slot) slot = v
-  return withSlot(
-    {
-      holes,
-      rawHoles: holes,
-      sealed,
-      spinPockets: 0,
-      confirmed: false,
-      bumpiness: bump,
-      bumpSquared,
-      iWells,
-      height,
-      maxHeight: Math.max(...h),
-      slot,
-    },
-    slot,
-  )
-}
-
-function withSlot(e: BoardEval, slot: number): BoardEval {
-  // a T-slot's own cavity is not a gap worth penalising: it is the point
-  return { ...e, slot, holes: Math.max(0, e.rawHoles - e.sealed - (slot ? 1 : 0)) }
-}
-
-/**
- * Run the real move-search checks for a node (once) and re-score it: is its
- * T-slot reachable, and what can actually fill each covered pocket?
- */
-/** Per-search memo of the move-search checks, keyed by board shape. */
-type CheckMemo = Map<number, { slot: number; pockets: ReturnType<typeof classifyPockets> | null }>
-
-function shapeHash(b: Board): number {
+function boardHash(b: Board): number {
   let h = 0x811c9dc5
   const top = Math.min(HEIGHT, VISIBLE + 4) * WIDTH
   for (let i = 0; i < top; i++) {
@@ -355,155 +287,16 @@ function shapeHash(b: Board): number {
   return h >>> 0
 }
 
-function confirmSlot(n: Node, queue: readonly PieceType[], memo?: CheckMemo) {
-  if (n.eval.confirmed) return
-  const key = memo ? shapeHash(n.board) : 0
-  let m = memo?.get(key)
-  if (!m) {
-    const slot0 = n.eval.slot ? tSlotLines(n.board) : 0
-    const pockets = n.eval.rawHoles > n.eval.sealed ? classifyPockets(n.board) : null
-    m = { slot: slot0, pockets }
-    memo?.set(key, m)
-  }
-  const slot = m.slot
-  let e: BoardEval = { ...withSlot(n.eval, slot), confirmed: true }
-  if (m.pockets) {
-    const p = m.pockets
-    // a reachable T-slot's own cavity is the point of the setup, not a liability
-    const spinPockets = Math.max(0, p.spinOnly - (slot ? 2 : 0))
-    e = { ...e, sealed: e.sealed + p.dead, spinPockets, holes: p.tuck }
-  }
-  n.eval = e
-  n.score = scoreNode(n, queue)
-}
+/** Transposition key: same board, same pieces left, same counters → same future. */
+const stateKey = (n: Node) => `${n.hash}|${n.next}|${n.current}|${n.hold}|${+n.canHold}|${n.counters.b2b}|${n.counters.combo}`
 
-// --- search ----------------------------------------------------------------------------------
-
-interface Node {
-  board: Board
-  counters: Counters
-  /** piece in hand, null when the known queue ran out */
-  current: PieceType | null
-  hold: PieceType | null
-  /** hold may be used for `current` */
-  canHold: boolean
-  /** next unread queue index */
-  next: number
-  steps: PlanStep[]
-  /** original-board row for each row of `board` (to map cells back) */
-  rows: number[]
-  attack: number
-  b2bClears: number
-  breaks: number
-  plain: number
-  /** sum of the per-kind B2B clear bonuses (full spin > quad > mini) */
-  clearBonus: number
-  eval: BoardEval
-  score: number
-  /** identifies the first placement (for diversity in the beam) */
-  first: string
-  /** sealed holes on the starting board */
-  rootSealed: number
-  /** which cells the plan itself placed (1) vs the starting board (0), kept in sync with line clears */
-  owned: Uint8Array
-}
-
-function tLeft(n: Node, queue: readonly PieceType[]): boolean {
-  if (n.current === 'T' || n.hold === 'T') return true
-  for (let i = n.next; i < queue.length; i++) if (queue[i] === 'T') return true
-  return false
-}
-
-function scoreNode(n: Node, queue: readonly PieceType[]): number {
-  const w = WEIGHTS
-  const e = n.eval
-  let s = n.attack * w.attack + n.clearBonus - n.breaks * w.b2bBreak - n.plain * w.plainClear
-  s -= e.sealed * w.sealed + e.holes * w.holes + e.spinPockets * w.spinPocket + e.bumpiness * w.bumpiness + e.height * w.height
-  s -= e.bumpSquared * w.bumpSquared + e.iWells * w.iWell
-  if (e.maxHeight > w.dangerRow) s -= (e.maxHeight - w.dangerRow) * w.danger
-  if (e.slot) s += e.slot * (tLeft(n, queue) ? w.tSlot : w.tSlotNoT)
-  return s
-}
-
-function boardKey(n: Node): string {
-  // cheap FNV-1a over the board, plus hold/counters/progress
-  let h = 0x811c9dc5
-  const b = n.board
-  const top = Math.min(HEIGHT, VISIBLE + 4) * WIDTH
-  for (let i = 0; i < top; i++) {
-    h ^= b[i] ? 1 : 0
-    h = Math.imul(h, 0x01000193)
-  }
-  return `${h >>> 0}|${n.hold}|${n.current}|${n.next}|${n.counters.b2b}|${n.counters.combo}`
-}
-
-function apply(n: Node, c: Candidate, nextCurrent: PieceType | null, hold: PieceType | null, next: number, queue: readonly PieceType[]): Node {
-  const r = c.result
-  // map rows: drop cleared rows from the mapping
-  let rows = n.rows
-  const owned = n.owned.slice()
-  for (const [x, y] of c.cells) owned[y * WIDTH + x] = 1
-  if (r.lines) {
-    const cleared = new Set<number>()
-    for (const [, y] of c.cells) {
-      let full = true
-      for (let x = 0; x < WIDTH && full; x++) {
-        if (!n.board[y * WIDTH + x] && !c.cells.some(([cx, cy]) => cx === x && cy === y)) full = false
-      }
-      if (full) cleared.add(y)
-    }
-    const kept = rows.filter((_, i) => !cleared.has(i))
-    let top = rows[rows.length - 1]
-    while (kept.length < rows.length) kept.push(++top)
-    rows = kept
-    // drop the same rows from the ownership map
-    let to = 0
-    for (let y = 0; y < HEIGHT; y++) {
-      if (cleared.has(y)) continue
-      if (to !== y) owned.copyWithin(to * WIDTH, y * WIDTH, (y + 1) * WIDTH)
-      to++
-    }
-    owned.fill(0, to * WIDTH)
-  }
-  const step: PlanStep = {
-    n: n.steps.length + 1,
-    type: c.piece.type,
-    piece: c.piece,
-    viaHold: c.viaHold,
-    path: c.path,
-    result: r,
-    cells: c.cells.map(([x, y]): Cell => [x, n.rows[y]]),
-    sealed: 0,
-  }
-  const keeps = r.lines > 0 && r.difficult
-  const child: Node = {
-    board: c.board,
-    counters: r.after,
-    current: nextCurrent,
-    hold,
-    canHold: true,
-    next,
-    steps: [...n.steps, step],
-    rows,
-    attack: n.attack + r.attack,
-    b2bClears: n.b2bClears + (keeps ? 1 : 0),
-    clearBonus:
-      n.clearBonus +
-      (keeps
-        ? (r.spin === 'full' ? WEIGHTS.fullSpinClear : r.spin === 'mini' ? WEIGHTS.miniSpinClear : WEIGHTS.quadClear) +
-          r.lines * WEIGHTS.b2bLine
-        : 0),
-    breaks: n.breaks + (r.b2bChange === 'broken' ? 1 : 0),
-    plain: n.plain + (r.lines > 0 && !r.difficult && r.b2bChange !== 'broken' ? 1 : 0),
-    eval: evaluateBoard(c.board),
-    score: 0,
-    first: n.steps.length ? n.first : `${c.viaHold ? 'h' : ''}${cellSetKey(c.cells)}`,
-    rootSealed: n.rootSealed,
-    owned,
-  }
-  step.sealed = child.eval.sealed
-  child.score = scoreNode(child, queue)
-  return child
+/** Known pieces not yet placed, nearest first (hold, hand, queue). */
+function remainingOf(n: Node, queue: readonly PieceType[]): PieceType[] {
+  const out: PieceType[] = []
+  if (n.hold) out.push(n.hold)
+  if (n.current) out.push(n.current)
+  for (let i = n.next; i < queue.length; i++) out.push(queue[i])
+  return out
 }
 
 interface Transition {
@@ -528,285 +321,417 @@ function transitions(n: Node, queue: readonly PieceType[]): Transition[] {
   return out
 }
 
-/**
- * May the plan clear lines with this "stuck piece" spin? Only if the cells
- * pinning it from above were on the starting board ('existing'), i.e. the plan
- * uses an overhang you already have instead of building a cage for the spin.
- */
-function miniSpinAllowed(n: Node, c: Candidate, mode: MiniSpinMode): boolean {
-  if (mode === 'any') return true
-  if (mode === 'off') return false
-  const mine = (x: number, y: number) => c.cells.some(([cx, cy]) => cx === x && cy === y)
-  let roofed = false
-  for (const [x, y] of c.cells) {
-    if (mine(x, y + 1) || y + 1 >= HEIGHT || !n.board[(y + 1) * WIDTH + x]) continue
-    roofed = true
-    if (n.owned[(y + 1) * WIDTH + x]) return false // the plan built this roof
-  }
-  return roofed
-}
+class Search {
+  readonly cfg: PlanScoreConfig
+  readonly s: PlanSearchConfig
+  readonly req: PlanRequest
+  readonly maxChain: number
+  private potentialMemo = new Map<string, number>()
+  private scoreMemo = new Map<string, PlanScore>()
+  nodes = 0
 
-function expand(n: Node, queue: readonly PieceType[], spinRule: SpinRule, miniSpins: MiniSpinMode = 'existing'): Node[] {
-  const out: Node[] = []
-  for (const t of transitions(n, queue)) {
-    for (const c of findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule })) {
-      // never suggest breaking back-to-back: such placements are not part of any plan
-      if (c.result.b2bChange === 'broken') continue
-      if (
-        c.result.lines > 0 &&
-        c.result.spin !== 'none' &&
-        spinBasis(n.board, c.piece) === 'immobile' &&
-        !miniSpinAllowed(n, c, miniSpins)
-      )
-        continue
-      out.push(apply(n, c, t.nextCurrent, t.hold, t.next, queue))
+  constructor(req: PlanRequest, opts: SearchOptions) {
+    this.req = req
+    this.cfg = opts.score ?? PLAN_SCORE
+    this.s = opts.search ?? PLAN_SEARCH
+    this.maxChain = req.maxChain ?? this.s.maxChain
+  }
+
+  root(): Node {
+    const req = this.req
+    const n: Node = {
+      board: req.board,
+      counters: req.counters,
+      current: req.current,
+      hold: req.hold,
+      canHold: !req.holdUsed,
+      next: 0,
+      steps: [],
+      rows: Array.from({ length: HEIGHT }, (_, i) => i),
+      attack: 0,
+      chain: 0,
+      full: 0,
+      tWasted: 0,
+      cheap: cheapEval(req.board, this.cfg),
+      achieved: 0,
+      potential: 0,
+      confirmed: false,
+      rank: 0,
+      first: '',
+      hash: boardHash(req.board),
     }
+    this.confirm(n)
+    return n
   }
-  return out
-}
 
-function describe(p: Omit<Plan, 'summary'>): string {
-  const seal = p.newSealed > 0 ? ` · seals ${p.newSealed} hole${p.newSealed > 1 ? 's' : ''}` : ''
-  return describeMain(p) + seal
-}
-
-function describeMain(p: Omit<Plan, 'summary'>): string {
-  // the piece sequence, e.g. "hold→L, T": tells plans apart at a glance
-  const seq = p.steps.map((s) => `${s.viaHold ? 'hold→' : ''}${s.type}`).join(', ')
-  if (p.payoffs.length) {
-    const parts = p.payoffs.map((i) => {
-      const s = p.steps[i]
-      return `${s.result.label} +${s.result.attack}`
-    })
-    const last = p.steps[p.payoffs[p.payoffs.length - 1]].result
-    const b2b = last.b2bChange === 'started' ? 'starts B2B' : `B2B ×${last.after.b2b}`
-    return `${parts.join(' → ')} · ${b2b} · ${seq}`
+  /** Child state after placing candidate `c` via transition `t`. */
+  apply(n: Node, c: Candidate, t: Transition): Node {
+    const r = c.result
+    let rows = n.rows
+    if (r.lines) {
+      const cleared = new Set<number>()
+      for (const [, y] of c.cells) {
+        let full = true
+        for (let x = 0; x < WIDTH && full; x++)
+          if (!n.board[y * WIDTH + x] && !c.cells.some(([cx, cy]) => cx === x && cy === y)) full = false
+        if (full) cleared.add(y)
+      }
+      const kept = rows.filter((_, i) => !cleared.has(i))
+      let top = rows[rows.length - 1]
+      while (kept.length < rows.length) kept.push(++top)
+      rows = kept
+    }
+    const step: PlanStep = {
+      n: n.steps.length + 1,
+      type: c.piece.type,
+      piece: c.piece,
+      viaHold: c.viaHold,
+      path: c.path,
+      result: r,
+      cells: c.cells.map(([x, y]): Cell => [x, n.rows[y]]),
+    }
+    const spinClear = r.lines > 0 && r.spin !== 'none'
+    const cfg = this.cfg
+    const chain = n.chain + (spinClear ? 1 : 0)
+    const full = n.full + (spinClear && r.spin === 'full' ? 1 : 0)
+    const links = full + (chain - full) * cfg.chainMiniFactor
+    const attack = n.attack + r.attack
+    const tWasted = n.tWasted + (c.piece.type === 'T' && !spinClear ? 1 : 0)
+    const pieces = n.steps.length + 1
+    const child: Node = {
+      board: c.board,
+      counters: r.after,
+      current: t.nextCurrent,
+      hold: t.hold,
+      canHold: true,
+      next: t.next,
+      steps: [...n.steps, step],
+      rows,
+      attack,
+      chain,
+      full,
+      tWasted,
+      cheap: cheapEval(c.board, cfg),
+      achieved:
+        attack * cfg.attack +
+        links * cfg.chainLink +
+        Math.max(0, links - 1) * cfg.chainBonus +
+        full * cfg.fullSpin -
+        pieces * cfg.piecesUsed -
+        tWasted * cfg.tWasted,
+      potential: 0,
+      confirmed: false,
+      rank: 0,
+      first: n.steps.length ? n.first : `${c.viaHold ? 'h' : ''}${cellSetKey(c.cells)}`,
+      hash: boardHash(c.board),
+    }
+    child.potential = this.optimisticPotential(child)
+    child.rank = child.achieved + child.potential - tieBreak(child.cheap, cfg, this.s)
+    return child
   }
-  if (p.slotAfter) return `Builds a ${['', 'TSS', 'TSD', 'TST'][p.slotAfter]} slot · ${seq}`
-  if (p.awkward)
-    return `No B2B-safe clear with these pieces: least-bad stacking, leaves ${p.awkward} awkward spot${p.awkward > 1 ? 's' : ''} · ${seq}`
-  return `No B2B-safe clear with these pieces: stacking cleanly · ${seq}`
-}
 
-function toPlan(n: Node, followed = false, rootSealed = n.rootSealed): Plan {
-  const payoffs: number[] = []
-  n.steps.forEach((s, i) => {
-    if (s.result.lines > 0 && s.result.difficult) payoffs.push(i)
-  })
-  let payoff = -1
-  for (const i of payoffs) if (payoff < 0 || n.steps[i].result.attack > n.steps[payoff].result.attack) payoff = i
-  const base = {
-    // show the steps up to the last payoff; after it the plan is just filler
-    steps: payoffs.length ? n.steps.slice(0, payoffs[payoffs.length - 1] + 1) : n.steps,
-    payoffs,
-    payoff,
-    attack: n.attack,
-    b2bClears: n.b2bClears,
-    breaks: n.breaks,
-    // the slot after the SHOWN steps: only known when the plan isn't cut at a payoff
-    slotAfter: payoffs.length ? 0 : n.eval.slot,
-    newSealed: 0,
-    awkward: 0,
-    score: n.score,
-    followed,
+  private optimisticPotential(n: Node): number {
+    const left = remainingOf(n, this.req.queue)
+    const cfg = this.cfg
+    let best = 0
+    if (left.includes('T')) best = tShapeLines(n.board)
+    if (this.req.spinRule !== 'tspin' && left.some((t) => t !== 'T' && t !== 'O'))
+      best = Math.max(best, this.req.spinRule === 'allspin' ? 2 : 2 * cfg.slotMiniFactor)
+    return best * cfg.slotKnown
   }
-  const shown = base.steps[base.steps.length - 1]
-  base.newSealed = shown ? shown.sealed - rootSealed : 0
-  return { ...base, summary: describe(base) }
-}
 
-function rootNode(req: PlanRequest): Node {
-  const root: Node = {
-    board: req.board,
-    counters: req.counters,
-    current: req.current,
-    hold: req.hold,
-    canHold: !req.holdUsed,
-    next: 0,
-    steps: [],
-    rows: Array.from({ length: HEIGHT }, (_, i) => i),
-    attack: 0,
-    b2bClears: 0,
-    breaks: 0,
-    plain: 0,
-    clearBonus: 0,
-    eval: evaluateBoard(req.board),
-    score: 0,
-    first: '',
-    rootSealed: 0,
-    owned: new Uint8Array(WIDTH * HEIGHT),
+  /** Replace the optimistic slot value with the real one (move search per piece type left). */
+  confirm(n: Node) {
+    if (n.confirmed) return
+    const types = [...new Set(remainingOf(n, this.req.queue))].sort().join('')
+    const key = `${n.hash}|${types}`
+    let v = this.potentialMemo.get(key)
+    if (v === undefined) {
+      v = 0
+      for (const t of types as Iterable<PieceType>) {
+        for (const sl of slots(n.board, t, this.req.spinRule)) {
+          const val = sl.lines * (sl.spin === 'full' ? 1 : this.cfg.slotMiniFactor)
+          if (val > v) v = val
+        }
+      }
+      v *= this.cfg.slotKnown
+      this.potentialMemo.set(key, v)
+    }
+    n.potential = v
+    n.confirmed = true
+    n.rank = n.achieved + n.potential - tieBreak(n.cheap, this.cfg, this.s)
   }
-  root.rootSealed = root.eval.sealed
-  root.score = scoreNode(root, req.queue)
-  confirmSlot(root, req.queue)
-  return root
-}
 
-/** Replay a followed plan on the current state; null if any step is no longer possible. */
-function replay(req: PlanRequest, follow: readonly FollowStep[]): Node | null {
-  let n = rootNode(req)
-  for (const f of follow) {
-    const t = transitions(n, req.queue).find((x) => x.viaHold === f.viaHold)
-    if (!t || t.type !== f.piece.type) return null
-    const want = cellSetKey(SHAPES[f.piece.type][f.piece.rot].map(([cx, cy]): Cell => [f.piece.x + cx, f.piece.y - cy]))
-    const c = findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule: req.spinRule }).find(
-      (x) => cellSetKey(x.cells) === want,
-    )
-    if (!c) return null
-    n = apply(n, c, t.nextCurrent, t.hold, t.next, req.queue)
-  }
-  return n
-}
-
-/** A placement still to be made: a piece and the cells it should cover (starting-board coordinates). */
-export interface Target {
-  type: PieceType
-  cells: readonly Cell[]
-}
-
-/**
- * Finish a setup in any order: find a sequence that places every target with
- * the pieces available (piece in hand, hold, queue), each at a reachable spot,
- * never breaking B2B. Tries the given order first (no hold, then hold), so an
- * in-order follower gets the original plan back. Null if no order works.
- */
-export function completePlan(req: PlanRequest, targets: readonly Target[]): Plan | null {
-  const want = targets.map((t) => ({ type: t.type, key: cellSetKey([...t.cells]) }))
-  const dfs = (n: Node, left: typeof want): Node | null => {
-    if (!left.length) return n
-    for (const t of transitions(n, req.queue)) {
-      for (let i = 0; i < left.length; i++) {
-        if (left[i].type !== t.type) continue
-        const c = findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule: req.spinRule }).find(
-          (c) => cellSetKey(c.cells.map(([x, y]): Cell => [x, n.rows[y]])) === left[i].key,
-        )
-        if (!c || c.result.b2bChange === 'broken') continue
-        const done = dfs(apply(n, c, t.nextCurrent, t.hold, t.next, req.queue), [...left.slice(0, i), ...left.slice(i + 1)])
-        if (done) return done
+  /** Children of a node after the hard prunes. */
+  expand(n: Node): Node[] {
+    const out: Node[] = []
+    if (n.chain >= this.maxChain) return out
+    for (const t of transitions(n, this.req.queue)) {
+      for (const c of findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule: this.req.spinRule })) {
+        // never part of a plan: breaking back-to-back
+        if (c.result.b2bChange === 'broken') continue
+        const child = this.apply(n, c, t)
+        // too tall, or a hole sealed off that the known pieces left can't reopen
+        if (child.cheap.maxHeight > this.cfg.heightLimit) continue
+        if (child.cheap.sealed > n.cheap.sealed && !reopenable(child.board, remainingOf(child, this.req.queue).length)) continue
+        out.push(child)
       }
     }
-    return null
+    this.nodes += out.length
+    return out
   }
-  const end = dfs(rootNode(req), want)
-  if (!end) return null
-  const p = toPlan(end, true)
-  annotate(p, req.board)
-  return p
-}
 
-/** The remaining steps of a plan, re-scored on the current state; null if no longer possible. */
-export function replayPlan(req: PlanRequest, follow: readonly FollowStep[]): Plan | null {
-  const n = replay(req, follow)
-  if (!n) return null
-  const p = toPlan(n, true)
-  annotate(p, req.board)
-  return p
+  /** Full end-state score (memoised: different orders often reach the same end). */
+  fullScore(n: Node): PlanScore {
+    const remaining = remainingOf(n, this.req.queue)
+    const key = `${n.hash}|${remaining.join('')}|${n.steps.map((s) => `${s.type}${s.result.label}${s.result.attack}`).join(',')}`
+    let sc = this.scoreMemo.get(key)
+    if (!sc) {
+      sc = scorePlan({ steps: n.steps, endBoard: n.board, remaining, rule: this.req.spinRule }, this.cfg)
+      this.scoreMemo.set(key, sc)
+    }
+    return sc
+  }
 }
 
 /**
- * Beam search. Calls `onProgress` after each depth with the best plans so far.
- * Returns the final top plans (distinct first moves).
+ * Could `pieces` more pieces reopen every sealed hole? A hole opens once every
+ * row holding a block above it in its column is cleared; those rows' empty
+ * cells must all be filled, at 4 cells a piece. (A bound, not a plan: it keeps
+ * setups like a spin that seals a cell the next spin clears out.)
  */
-export function searchPlans(
-  req: PlanRequest,
-  onProgress?: (p: PlanProgress) => void,
-  top = 3,
-  opts: SearchOptions = {},
-): Plan[] {
+function reopenable(board: Board, pieces: number): boolean {
+  const rows = new Set<number>()
+  for (const i of sealedCells(board)) {
+    const x = i % WIDTH
+    for (let y = (i - x) / WIDTH + 1; y < HEIGHT; y++) if (board[y * WIDTH + x]) rows.add(y)
+  }
+  let need = 0
+  for (const y of rows) for (let x = 0; x < WIDTH; x++) if (!board[y * WIDTH + x]) need++
+  return need <= pieces * 4
+}
+
+const isPayoff = (r: ClearResult) => r.lines > 0 && r.difficult && r.b2bChange !== 'broken'
+
+/**
+ * Search for plans. Calls `onProgress` after each pass with the best plans so
+ * far. Returns up to `top` verified plans with distinct first moves.
+ */
+export function searchPlans(req: PlanRequest, onProgress?: (p: PlanProgress) => void, top = 3, opts: SearchOptions = {}): Plan[] {
   const t0 = performance.now()
+  const S = new Search(req, opts)
+  const cfgS = S.s
+  const budget = req.budgetMs ?? cfgS.budgetMs
+  const deadline = t0 + budget
+  const beamMax = req.beamMax ?? cfgS.beamMax
+  const known = 1 + (req.hold ? 1 : 0) + req.queue.length
+  const maxPieces = Math.max(1, Math.min(req.depth ?? known, known))
   const verify = opts.verify !== false
   const start = verify ? stateFromRequest(req) : null
-  let beam: Node[] = [rootNode(req)]
-  let nodes = 0
-  let plans: Plan[] = []
   const tally = { discarded: 0 }
-  const memo: CheckMemo = new Map()
-  const depth = Math.max(1, Math.min(6, req.depth))
-  for (let d = 1; d <= depth; d++) {
+
+  // plans found across passes: complete chains, and setup candidates
+  const chains = new Map<string, Node>()
+  const setups = new Map<string, Node>()
+  const keep = (pool: Map<string, Node>, n: Node) => {
+    const k = `${n.first}|${stateKey(n)}`
+    const cur = pool.get(k)
+    if (!cur || cur.rank < n.rank) pool.set(k, n)
+  }
+
+  let plans: Plan[] = []
+  let pass = 0
+  for (let beamW = req.beam ?? cfgS.beamStart; ; beamW *= 3) {
+    const finished = runPass(S, beamW, maxPieces, pass === 0 ? Infinity : deadline, (n) => {
+      if (n.steps.length && isPayoff(n.steps[n.steps.length - 1].result)) keep(chains, n)
+      else if (!n.chain) keep(setups, n)
+    })
+    pass++
+    plans = finalize(S, chains, setups, top, start, tally)
+    onProgress?.({ pass, beam: beamW, plans, nodes: S.nodes, ms: performance.now() - t0, discarded: tally.discarded })
+    if (!finished || beamW * 3 > beamMax || performance.now() >= deadline) break
+  }
+  return plans
+}
+
+/**
+ * One beam pass to `maxPieces`. Each level: rank children, confirm slot values
+ * lazily best-first (confirming only lowers the optimistic T value; non-T slot
+ * values are bounded the same way), admit with a transposition check and a
+ * per-first-move cap. Returns false if the deadline cut it short.
+ */
+function runPass(S: Search, beamW: number, maxPieces: number, deadline: number, seen: (n: Node) => void): boolean {
+  let beam: Node[] = [S.root()]
+  for (let d = 1; d <= maxPieces; d++) {
     const children: Node[] = []
     for (const n of beam) {
-      const kids = expand(n, req.queue, req.spinRule, req.miniSpins)
-      nodes += kids.length
-      // a line that ran out of known pieces (e.g. one left in hold) competes as it is:
-      // the piece count is a horizon, not a quota
-      if (kids.length) children.push(...kids)
-      else if (n.steps.length) children.push(n)
+      if (performance.now() > deadline) return false
+      children.push(...S.expand(n))
     }
     if (!children.length) break
-    // Rank by the optimistic score (cheap slot-shape check), then confirm slots and
-    // pockets with the real move search lazily, best first. Confirming only ever
-    // lowers a score (the optimistic one is an upper bound), so a confirmed node is
-    // admitted once no unconfirmed node could still beat it. (Confirming a fixed
-    // front-runner set instead let inflated look-alikes crowd out clean lines.)
-    children.sort((a, b) => b.score - a.score)
-    // no first move may take more than a third of the beam, so alternatives survive
-    const seen = new Set<string>()
+    children.sort((a, b) => b.rank - a.rank)
+    const admitted = new Set<string>()
     const perFirst = new Map<string, number>()
-    const cap = Math.max(2, Math.ceil(req.beam / 3))
+    const cap = Math.max(2, Math.ceil(beamW / 3))
     const pool: Node[] = [] // confirmed, best last
     const insert = (c: Node) => {
       let lo = 0
       let hi = pool.length
       while (lo < hi) {
         const mid = (lo + hi) >> 1
-        if (pool[mid].score <= c.score) lo = mid + 1
+        if (pool[mid].rank <= c.rank) lo = mid + 1
         else hi = mid
       }
       pool.splice(lo, 0, c)
     }
-    beam = []
+    let budget = beamW * 3
     let i = 0
-    // confirmation is the expensive part (a move search per piece type): past this
-    // budget, fall back to admitting in optimistic order and confirming on admission
-    let budget = Math.max(req.beam, 40) * 3
-    while (beam.length < req.beam) {
-      const nextOpt = i < children.length ? (budget > 0 ? children[i].score : -Infinity) : -Infinity
-      if (budget <= 0 && !pool.length && i < children.length) {
+    beam = []
+    const admit = (c: Node) => {
+      const k = stateKey(c)
+      if (admitted.has(k)) return
+      const used = perFirst.get(c.first) ?? 0
+      if (used >= cap) return
+      admitted.add(k)
+      perFirst.set(c.first, used + 1)
+      S.confirm(c)
+      beam.push(c)
+      seen(c)
+    }
+    while (beam.length < beamW) {
+      const nextOpt = i < children.length && budget > 0 ? children[i].rank : -Infinity
+      if (pool.length && pool[pool.length - 1].rank >= nextOpt) admit(pool.pop() as Node)
+      else if (i < children.length) {
         const c = children[i++]
-        const k = boardKey(c)
-        if (seen.has(k)) continue
-        const used = perFirst.get(c.first) ?? 0
-        if (used >= cap) continue
-        seen.add(k)
-        perFirst.set(c.first, used + 1)
-        confirmSlot(c, req.queue, memo)
-        beam.push(c)
-        continue
-      }
-      if (pool.length && pool[pool.length - 1].score >= nextOpt) {
-        const c = pool.pop() as Node
-        const k = boardKey(c)
-        if (seen.has(k)) continue
-        const used = perFirst.get(c.first) ?? 0
-        if (used >= cap) continue
-        seen.add(k)
-        perFirst.set(c.first, used + 1)
-        beam.push(c)
-      } else if (i < children.length) {
-        const c = children[i++]
-        if (seen.has(boardKey(c))) continue
-        if (!c.eval.confirmed) budget--
-        confirmSlot(c, req.queue, memo) // no unconfirmed slot ever reaches a plan
-        insert(c)
+        if (admitted.has(stateKey(c))) continue
+        if (budget > 0) {
+          budget--
+          S.confirm(c)
+          insert(c)
+        } else admit(c)
       } else break
     }
-    plans = pickPlans(beam, top, start, tally, req.board)
-    onProgress?.({ depthDone: d, plans, nodes, ms: performance.now() - t0, discarded: tally.discarded })
+    // completed chains count even when they didn't make the beam
+    for (const c of children)
+      if (isPayoff(c.steps[c.steps.length - 1].result)) {
+        S.confirm(c)
+        seen(c)
+      }
   }
-  return plans
+  return true
 }
+
+/** Fully score the best candidates, verify, explain; distinct first moves. */
+function finalize(
+  S: Search,
+  chains: Map<string, Node>,
+  setups: Map<string, Node>,
+  top: number,
+  start: GameState | null,
+  tally: { discarded: number },
+): Plan[] {
+  // a finished plan never leaves more sealed holes than it started with (mid-plan
+  // it may seal one that a later clear reopens)
+  const rootSealed = sealedHoles(S.req.board)
+  const ok = (n: Node) => n.cheap.sealed <= rootSealed
+  const chainList = [...chains.values()].filter(ok)
+  const pool = chainList.length ? chainList : [...setups.values()].filter(ok)
+  const kind = chainList.length ? 'chain' : 'setup'
+  pool.sort((a, b) => b.rank - a.rank)
+  // finalists: the best by rank, but no first move takes more than its share
+  const per = new Map<string, number>()
+  const picked: Node[] = []
+  for (const n of pool) {
+    const k = per.get(n.first) ?? 0
+    if (k >= S.s.finalists) continue
+    per.set(n.first, k + 1)
+    picked.push(n)
+    if (picked.length >= top * S.s.finalists * 2) break
+  }
+  const scored = picked.map((n) => ({ n, sc: S.fullScore(n) }))
+  scored.sort((a, b) => b.sc.total - a.sc.total)
+  const out: Plan[] = []
+  const firsts = new Set<string>()
+  // the same placements in another order are the same plan (the player can follow either)
+  const sets = new Set<string>()
+  for (const { n, sc } of scored) {
+    if (firsts.has(n.first)) continue
+    const set = n.steps.map((s) => `${s.type}:${cellSetKey(s.cells)}`).sort().join('|')
+    if (sets.has(set)) continue
+    const p = toPlan(n, sc, kind)
+    if (start && !verifyPlan(start, p).ok) {
+      tally.discarded++
+      continue
+    }
+    firsts.add(n.first)
+    sets.add(set)
+    annotate(p, S.req.board, sc, remainingOf(n, S.req.queue))
+    out.push(p)
+    if (out.length >= top) break
+  }
+  const seen = new Map<string, number>()
+  for (const p of out) {
+    const k = (seen.get(p.summary) ?? 0) + 1
+    seen.set(p.summary, k)
+    if (k > 1) p.summary += ` (variant ${k})`
+  }
+  return out
+}
+
+function toPlan(n: Node, sc: PlanScore, kind: Plan['kind'], followed = false): Plan {
+  const payoffs: number[] = []
+  n.steps.forEach((s, i) => {
+    if (isPayoff(s.result)) payoffs.push(i)
+  })
+  return {
+    kind,
+    steps: n.steps.map((s) => ({ ...s, note: undefined })),
+    payoffs,
+    chain: n.chain,
+    attack: n.attack,
+    score: sc.total,
+    terms: sc.terms,
+    awkward: 0,
+    followed,
+    summary: '',
+  }
+}
+
+// --- explanations ------------------------------------------------------------------------
 
 const article = (t: string) => (t === 'I' || t === 'L' || t === 'O' || t === 'S' ? 'an' : 'a')
 
+function describe(p: Plan, sc: PlanScore, remaining: readonly PieceType[]): string {
+  const seq = p.steps.map((s) => `${s.viaHold ? 'hold→' : ''}${s.type}`).join(', ')
+  if (p.payoffs.length) {
+    const parts = p.payoffs.map((i) => `${p.steps[i].result.label} +${p.steps[i].result.attack}`)
+    const last = p.steps[p.payoffs[p.payoffs.length - 1]].result
+    const b2b = last.b2bChange === 'started' ? 'starts B2B' : `B2B ×${last.after.b2b}`
+    return `${parts.join(' → ')} · ${b2b} · ${seq}`
+  }
+  // a setup: name the best slot it leaves for a piece we know is coming
+  let best: { label: string; type: PieceType; v: number } | null = null
+  for (const t of new Set(remaining)) {
+    for (const s of sc.features.slots[t]) {
+      const v = s.lines * (s.spin === 'full' ? 2 : 1)
+      if (!best || v > best.v) best = { label: s.label, type: t, v }
+    }
+  }
+  if (best) return `Setup: ${best.label} slot ready for the ${best.type} · ${seq}`
+  const awk = p.awkward ? `, leaves ${p.awkward} awkward spot${p.awkward > 1 ? 's' : ''}` : ''
+  return `No spin clear with these pieces: cleanest stacking${awk} · ${seq}`
+}
+
 /**
- * Explain a shown plan: replay its steps from the starting board, track every
+ * Explain a plan: replay its steps from the starting board, track every
  * awkward cell (sealed, unreachable, or spin-only) in starting-board coordinates
- * through line clears, and note each step that creates one the plan never uses.
+ * through line clears, and note each step that creates one the plan leaves
+ * behind (a spin slot's own cavity is the point of a setup, so not counted).
  */
-function annotate(p: Plan, root: Board) {
+function annotate(p: Plan, root: Board, sc: PlanScore, remaining: readonly PieceType[]) {
   type Kind = string[] | 'sealed' | 'dead'
   let board = root
-  let rows = Array.from({ length: HEIGHT }, (_, i) => i) // current row → starting-board row
+  let rows = Array.from({ length: HEIGHT }, (_, i) => i)
   const awkwardNow = (b: Board) => {
     const m = new Map<string, Kind>()
     for (const [i, kind] of classifyPockets(b, undefined, true).awkward ?? []) {
@@ -820,7 +745,6 @@ function annotate(p: Plan, root: Board) {
   let prev = before
   for (const st of p.steps) {
     const placed = placeOnBoard(board, st.piece)
-    // rows this lock clears, to keep `rows` mapped to the starting board
     const cleared: number[] = []
     for (let y = 0; y < HEIGHT; y++) {
       let full = true
@@ -839,9 +763,10 @@ function annotate(p: Plan, root: Board) {
     created.push(new Map([...now].filter(([k]) => !prev.has(k))))
     prev = now
   }
-  // a planned T-slot's cavity is the point of the setup
-  const isSlot = (kind: Kind) => p.slotAfter > 0 && Array.isArray(kind) && kind.includes('T')
-  const left = new Map([...prev].filter(([k, kind]) => !before.has(k) && !isSlot(kind)))
+  // cells of spin slots on the end stack, in starting-board coordinates
+  const slotCells = new Set<string>()
+  for (const list of Object.values(sc.features.slots)) for (const s of list) for (const [x, y] of s.cells) slotCells.add(`${x},${rows[y]}`)
+  const left = new Map([...prev].filter(([k]) => !before.has(k) && !slotCells.has(k)))
   p.steps.forEach((st, i) => {
     const mine = [...created[i]].filter(([k]) => left.has(k)).map(([, kind]) => kind)
     if (!mine.length) return
@@ -853,33 +778,45 @@ function annotate(p: Plan, root: Board) {
     }
   })
   p.awkward = left.size
-  p.summary = describe(p)
+  p.summary = describe(p, sc, remaining)
 }
 
-/** Best plans with distinct first moves; with `start`, only plans the engine reproduces. */
-function pickPlans(beam: Node[], top: number, start: GameState | null, tally: { discarded: number }, root?: Board): Plan[] {
-  const out: Plan[] = []
-  const firsts = new Set<string>()
-  for (const n of beam) {
-    const p = toPlan(n)
-    const f = p.steps[0]
-    const k = f ? `${f.viaHold}|${f.cells.join(';')}` : ''
-    if (firsts.has(k)) continue
-    if (start && !verifyPlan(start, p).ok) {
-      tally.discarded++
-      continue
+// --- following a plan --------------------------------------------------------------------
+
+/** A placement still to be made: a piece and the cells it should cover (starting-board coordinates). */
+export interface Target {
+  type: PieceType
+  cells: readonly Cell[]
+}
+
+/**
+ * Finish a plan in any order: find a sequence that places every target with
+ * the pieces available (piece in hand, hold, queue), each at a reachable spot,
+ * never breaking B2B. Tries the given order first, so an in-order follower
+ * gets the original plan back. Null if no order works.
+ */
+export function completePlan(req: PlanRequest, targets: readonly Target[], opts: SearchOptions = {}): Plan | null {
+  const S = new Search(req, opts)
+  const want = targets.map((t) => ({ type: t.type, key: cellSetKey([...t.cells]) }))
+  const dfs = (n: Node, left: typeof want): Node | null => {
+    if (!left.length) return n
+    for (const t of transitions(n, req.queue)) {
+      for (let i = 0; i < left.length; i++) {
+        if (left[i].type !== t.type) continue
+        const c = findPlacements(n.board, t.type, n.counters, t.viaHold, { spinRule: req.spinRule }).find(
+          (c) => cellSetKey(c.cells.map(([x, y]): Cell => [x, n.rows[y]])) === left[i].key,
+        )
+        if (!c || c.result.b2bChange === 'broken') continue
+        const done = dfs(S.apply(n, c, t), [...left.slice(0, i), ...left.slice(i + 1)])
+        if (done) return done
+      }
     }
-    firsts.add(k)
-    if (root) annotate(p, root)
-    out.push(p)
-    if (out.length >= top) break
+    return null
   }
-  // same summary (same pieces, same payoff) but different spots: say so
-  const seen = new Map<string, number>()
-  for (const p of out) {
-    const n = (seen.get(p.summary) ?? 0) + 1
-    seen.set(p.summary, n)
-    if (n > 1) p.summary += ` (variant ${n})`
-  }
-  return out
+  const end = dfs(S.root(), want)
+  if (!end) return null
+  const sc = S.fullScore(end)
+  const p = toPlan(end, sc, end.chain || end.steps.some((s) => isPayoff(s.result)) ? 'chain' : 'setup', true)
+  annotate(p, req.board, sc, remainingOf(end, req.queue))
+  return p
 }

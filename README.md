@@ -19,8 +19,9 @@ scores, describe it in JSON (format in `src/harness/position.ts`; examples in
 
 ```sh
 npm run plan -- fixtures/2026-11-19-i-dependency.json   # or a whole folder
-npm run plan -- fixtures --depth 6 --beam 200 --top 3 --all
+npm run plan -- fixtures --budget 200 --top 3 --all      # like the app's Quick search
 ```
 
 Each plan prints its keys, the stack it leaves, and a table of what every score
-term contributed.
+term contributed. Without `--budget` the search runs every pass (16, 48, 144,
+432 wide), so results are the same on every machine.

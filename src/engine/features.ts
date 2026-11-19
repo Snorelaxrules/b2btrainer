@@ -56,11 +56,18 @@ function floodOpen(board: Board, h: number[]): Uint8Array {
  * not sealed; a cell boxed in on every side is.
  */
 export function sealedHoles(board: Board, h: number[] = heights(board)): number {
-  const seen = floodOpen(board, h)
-  let sealed = 0
-  for (let x = 0; x < WIDTH; x++) for (let y = 0; y < h[x]; y++) if (!board[y * WIDTH + x] && !seen[y * WIDTH + x]) sealed++
-  return sealed
+  return sealedCells(board, h).length
 }
+
+/** The sealed cells themselves (indices y*WIDTH+x). */
+export function sealedCells(board: Board, h: number[] = heights(board)): number[] {
+  const seen = floodOpen(board, h)
+  const out: number[] = []
+  for (let x = 0; x < WIDTH; x++)
+    for (let y = 0; y < h[x]; y++) if (!board[y * WIDTH + x] && !seen[y * WIDTH + x]) out.push(y * WIDTH + x)
+  return out
+}
+
 
 export interface Pockets {
   /** covered cells some piece can slide, drop or rotate into without needing a spin */

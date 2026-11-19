@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import { BEAM_PRESETS } from '../app/planner'
+import { BUDGET_PRESETS } from '../app/planner'
 import type { Trainer } from '../app/trainer'
 import { MOVE_LABEL } from '../engine/movegen'
 import type { Plan, PlanStep } from '../engine/planner'
@@ -50,6 +50,36 @@ function Step({ st, payoff }: { st: PlanStep; payoff: boolean }) {
   )
 }
 
+function Breakdown({ p }: { p: Plan }) {
+  const terms = p.terms.filter((t) => t.points !== 0)
+  return (
+    <details className="breakdown">
+      <summary>
+        Why this plan · score {p.score.toFixed(1)}
+        {p.kind === 'chain' ? ` · ${p.chain} spin${p.chain === 1 ? '' : 's'} · +${p.attack} attack` : ' · setup'} ·{' '}
+        {p.steps.length} piece{p.steps.length === 1 ? '' : 's'}
+      </summary>
+      <table>
+        <tbody>
+          {terms.map((t) => (
+            <tr key={t.key} title={t.detail}>
+              <td>
+                {t.label}
+                {t.detail && <span className="muted"> · {t.detail}</span>}
+              </td>
+              <td className="num">{t.value}</td>
+              <td className={`num ${t.points > 0 ? 'pos' : 'neg'}`}>
+                {t.points > 0 ? '+' : ''}
+                {t.points.toFixed(1)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
+  )
+}
+
 function PlanButton({ p, i, on, onClick }: { p: Plan; i: number; on: boolean; onClick: () => void }) {
   return (
     <button className={`plan-btn${on ? ' on' : ''}`} onClick={onClick} aria-pressed={on}>
@@ -65,6 +95,7 @@ function PlanButton({ p, i, on, onClick }: { p: Plan; i: number; on: boolean; on
 export function PlanPanel({ trainer }: { trainer: Trainer }) {
   const pl = trainer.planner
   useSyncExternalStore(pl.subscribe, pl.getVersion)
+  useSyncExternalStore(trainer.subscribe, trainer.getVersion)
   const st = pl.settings
   const plan = pl.plan
   const blur = (e: { currentTarget: HTMLElement }) => e.currentTarget.blur()
@@ -96,9 +127,9 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
               blur(e)
             }}
           >
-            {[1, 2, 3, 4, 5, 6].map((d) => (
+            {[1, 2, 3, 4, 5, 6, 7].map((d) => (
               <option key={d} value={d}>
-                {d}
+                {d === 7 ? 'all' : d}
               </option>
             ))}
           </select>
@@ -106,15 +137,15 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
         <label>
           Search{' '}
           <select
-            value={st.beam}
+            value={st.budgetMs}
             onChange={(e) => {
-              trainer.setPlanner({ beam: Number(e.target.value) })
+              trainer.setPlanner({ budgetMs: Number(e.target.value) })
               blur(e)
             }}
           >
-            {BEAM_PRESETS.map((b) => (
-              <option key={b.beam} value={b.beam}>
-                {b.label}
+            {BUDGET_PRESETS.map((b) => (
+              <option key={b.ms} value={b.ms}>
+                {b.label} ({b.ms < 1000 ? `${b.ms} ms` : `${b.ms / 1000} s`})
               </option>
             ))}
           </select>
@@ -123,7 +154,7 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
           <span className="status" aria-live="polite">
             {pl.running ? (
               <>
-                <span className="spinner" aria-hidden="true" /> {pl.depthDone}/{st.depth}
+                <span className="spinner" aria-hidden="true" /> pass {pl.pass + 1}
               </>
             ) : pl.following ? null : (
               `${(pl.ms / 1000).toFixed(2)} s`
@@ -132,25 +163,29 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
         )}
       </div>
 
-      <div className="seg" role="group" aria-label="Spins the planner may use">
+      <div className="seg" role="group" aria-label="Spin rule (game and planner)">
         {(
           [
-            ['existing', 'All-spin'],
-            ['off', 'T-spins only'],
+            ['allmini+', 'All-spin'],
+            ['tspin', 'T-spins only'],
           ] as const
-        ).map(([mode, label]) => (
-          <button
-            key={mode}
-            className={st.miniSpins === mode ? 'on' : undefined}
-            aria-pressed={st.miniSpins === mode}
-            onClick={(e) => {
-              trainer.setPlanner({ miniSpins: mode })
-              blur(e)
-            }}
-          >
-            {label}
-          </button>
-        ))}
+        ).map(([rule, label]) => {
+          const on = rule === 'tspin' ? trainer.settings.spinRule === 'tspin' : trainer.settings.spinRule !== 'tspin'
+          return (
+            <button
+              key={rule}
+              className={on ? 'on' : undefined}
+              aria-pressed={on}
+              title={rule === 'tspin' ? 'Only T-spins count (and keep B2B)' : 'Any piece stuck after a rotation counts as a spin (All-Mini+)'}
+              onClick={(e) => {
+                if (!on) trainer.update({ spinRule: rule })
+                blur(e)
+              }}
+            >
+              {label}
+            </button>
+          )
+        })}
       </div>
 
       {pl.note && <p className="plan-note">{pl.note}</p>}
@@ -158,7 +193,7 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
       {!pl.active && !pl.note && (
         <p className="muted small">
           Play normally. Press <kbd>P</kbd> when you want a spin setup from the current position: the planner looks at
-          your piece, hold and the next {Math.min(5, st.depth)} previews only.
+          your piece, hold and the previews only, and looks for spins in a row that keep B2B.
         </p>
       )}
 
@@ -196,6 +231,7 @@ export function PlanPanel({ trainer }: { trainer: Trainer }) {
       )}
       {pl.active && !pl.following && !pl.plans.length && pl.running && <p className="muted small">Searching…</p>}
 
+      {plan && <Breakdown p={plan} />}
       {plan && (
         <ol className="steps">
           {plan.steps.map((s, i) => (

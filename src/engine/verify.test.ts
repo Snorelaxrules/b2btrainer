@@ -21,9 +21,8 @@ function planOf(cands: { c: Candidate; type: G.ActivePiece['type'] }[]): Plan {
     path: c.path,
     result: c.result,
     cells: c.cells,
-    sealed: 0,
   }))
-  return { steps, payoffs: [], payoff: -1, attack: 0, b2bClears: 0, breaks: 0, slotAfter: 0, newSealed: 0, awkward: 0, score: 0, summary: 'hand-made' }
+  return { kind: 'setup', steps, payoffs: [], chain: 0, attack: 0, score: 0, terms: [], awkward: 0, summary: 'hand-made' }
 }
 
 /** TSD slot at columns 1–3 (T points down into column 2), roofed at (1,2)… open above columns 2–3. */
@@ -43,7 +42,9 @@ function request(over: Partial<PlanRequest>): PlanRequest {
     holdUsed: false,
     queue: ['T', 'L', 'J', 'S', 'Z'],
     depth: 3,
-    beam: 60,
+    beam: 16,
+    beamMax: 48,
+    budgetMs: Infinity,
     spinRule: 'allmini+',
     ...over,
   }

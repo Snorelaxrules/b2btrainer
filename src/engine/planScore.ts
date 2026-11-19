@@ -230,11 +230,12 @@ export function scorePlan(o: PlanOutcome, cfg: PlanScoreConfig = PLAN_SCORE): Pl
   const full = spins.filter((s) => s.result.spin === 'full').length
   const breaks = o.steps.filter((s) => s.result.b2bChange === 'broken').length
   add('attack', 'Attack sent', attack, attack * cfg.attack)
+  const links = spins.reduce((a, s) => a + (s.result.spin === 'full' ? 1 : cfg.chainMiniFactor), 0)
   add(
     'chain',
     'Spin chain',
     spins.length,
-    spins.length * cfg.chainLink + Math.max(0, spins.length - 1) * cfg.chainBonus,
+    links * cfg.chainLink + Math.max(0, links - 1) * cfg.chainBonus,
     spins.map((s) => s.result.label).join(' → ') || undefined,
   )
   add('fullSpin', 'Full spins', full, full * cfg.fullSpin)
@@ -287,7 +288,7 @@ export function scorePlan(o: PlanOutcome, cfg: PlanScoreConfig = PLAN_SCORE): Pl
 }
 
 /** A plain-text table of the terms (headless harness, debugging). */
-export function formatScore(s: PlanScore, all = false): string {
+export function formatScore(s: Pick<PlanScore, 'total' | 'terms'>, all = false): string {
   const rows = s.terms.filter((t) => all || t.points !== 0)
   const w = Math.max(...rows.map((t) => t.label.length), 5)
   const v = Math.max(...rows.map((t) => String(t.value).length), 5)

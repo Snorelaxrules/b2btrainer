@@ -30,13 +30,13 @@ describe('position files', () => {
 describe('harness', () => {
   it('scores each plan on its end stack and prints a breakdown that adds up', () => {
     const p = parsePosition(load('2026-11-19-i-dependency.json'))
-    const r = analysePosition(p, { beam: 40, depth: 4 })
+    const r = analysePosition(p, { beam: 16, beamMax: 48, depth: 4 })
     expect(r.reports.length).toBeGreaterThan(0)
     for (const rep of r.reports) {
-      expect(rep.score.terms.reduce((a, t) => a + t.points, 0)).toBeCloseTo(rep.score.total, 1)
+      expect(rep.plan.terms.reduce((a, t) => a + t.points, 0)).toBeCloseTo(rep.plan.score, 1)
     }
     // best score first
-    expect(r.reports.map((x) => x.score.total)).toEqual([...r.reports.map((x) => x.score.total)].sort((a, b) => b - a))
+    expect(r.reports.map((x) => x.plan.score)).toEqual([...r.reports.map((x) => x.plan.score)].sort((a, b) => b - a))
     const text = formatPositionReport(r)
     expect(text).toMatch(/end stack:/)
     expect(text).toMatch(/total/)

@@ -14,7 +14,7 @@ import { InputController } from '../input/controller'
 import { bindKeyboard } from '../input/keyboard'
 import { type Overlay, Renderer } from '../render/renderer'
 import { PlanOverlay } from '../render/planOverlay'
-import { PlannerController, type PlannerSettings } from './planner'
+import { BUDGET_PRESETS, PlannerController, type PlannerSettings } from './planner'
 
 export interface TrainerSettings {
   seed: number
@@ -50,7 +50,7 @@ function loadSettings(): TrainerSettings {
     customQueue: '',
     gravity: DEFAULT_RULES.gravity,
     spinRule: DEFAULT_RULES.spinRule,
-    planner: { depth: 5, beam: 100, miniSpins: 'existing' },
+    planner: { depth: 6, budgetMs: 200 },
     handling: { ...HANDLING },
   }
   try {
@@ -66,9 +66,11 @@ function loadSettings(): TrainerSettings {
       seed: saved.lockSeed && typeof saved.seed === 'number' ? saved.seed : base.seed,
       handling: loadHandling(saved.handling),
       planner: {
-        depth: typeof saved.planner?.depth === 'number' ? saved.planner.depth : base.planner.depth,
-        beam: typeof saved.planner?.beam === 'number' ? saved.planner.beam : base.planner.beam,
-        miniSpins: saved.planner?.miniSpins === 'off' ? 'off' : 'existing',
+        depth:
+          typeof saved.planner?.depth === 'number' ? Math.max(1, Math.min(7, saved.planner.depth)) : base.planner.depth,
+        budgetMs: BUDGET_PRESETS.some((b) => b.ms === saved.planner?.budgetMs)
+          ? (saved.planner?.budgetMs as number)
+          : base.planner.budgetMs,
       },
     }
   } catch {
