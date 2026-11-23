@@ -9,13 +9,19 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc -b",
-    "plan": "node --import ./scripts/ts-hooks.mjs scripts/plan.ts"
+    "plan": "node --import ./scripts/ts-hooks.mjs scripts/plan.ts",
+    "agree": "node --import ./scripts/ts-hooks.mjs scripts/agree.ts",
+    "extract": "node scripts/replay/extract.mjs",
+    "replay-check": "node scripts/replay/check.mjs",
+    "tune": "node --import ./scripts/ts-hooks.mjs scripts/tune.ts",
+    "fixtures": "node --import ./scripts/ts-hooks.mjs scripts/fixtures.ts"
   },
   "dependencies": {
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@haelp/teto": "^4.2.8",
     "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

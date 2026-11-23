@@ -398,6 +398,7 @@ class Search {
     const attack = n.attack + r.attack
     const tWasted = n.tWasted + (c.piece.type === 'T' && !spinClear ? 1 : 0)
     const pieces = n.steps.length + 1
+    const holds = n.steps.filter((s) => s.viaHold).length + (c.viaHold ? 1 : 0)
     const child: Node = {
       board: c.board,
       counters: r.after,
@@ -418,6 +419,7 @@ class Search {
         Math.max(0, links - 1) * cfg.chainBonus +
         full * cfg.fullSpin -
         pieces * cfg.piecesUsed -
+        holds * cfg.holdUsed -
         tWasted * cfg.tWasted,
       potential: 0,
       confirmed: false,

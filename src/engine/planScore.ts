@@ -179,7 +179,7 @@ export function stackFeatures(board: Board, rule: SpinRule, cfg: PlanScoreConfig
 
 export interface PlanOutcome {
   /** what each placement did, in order */
-  steps: readonly { type: PieceType; result: ClearResult }[]
+  steps: readonly { type: PieceType; result: ClearResult; viaHold?: boolean }[]
   /** the stack after the last placement */
   endBoard: Board
   /** known pieces still unplaced after the plan, nearest first (hold, then the queue) */
@@ -240,6 +240,8 @@ export function scorePlan(o: PlanOutcome, cfg: PlanScoreConfig = PLAN_SCORE): Pl
   )
   add('fullSpin', 'Full spins', full, full * cfg.fullSpin)
   add('pieces', 'Pieces used', o.steps.length, -o.steps.length * cfg.piecesUsed)
+  const holds = o.steps.filter((s) => s.viaHold).length
+  if (holds && cfg.holdUsed) add('holds', 'Holds used', holds, -holds * cfg.holdUsed)
   if (breaks) add('b2bBreak', 'B2B breaks', breaks, -breaks * cfg.b2bBreak)
 
   // end stack: cleanliness

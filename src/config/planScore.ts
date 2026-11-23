@@ -20,6 +20,8 @@ export interface PlanScoreConfig {
   fullSpin: number
   /** per piece placed: tempo. Kept small so it never outweighs stack quality */
   piecesUsed: number
+  /** per hold the plan uses: each costs the player tempo and flexibility */
+  holdUsed: number
   /** per B2B break (search prunes these; kept so re-scored plans show it) */
   b2bBreak: number
 
@@ -74,37 +76,44 @@ export interface PlanScoreConfig {
   heightLimit: number
 }
 
+/**
+ * Tuned 2026-11-23 against 5han's Tetra League play (npm run tune: two matches,
+ * searches of 16 then 48 wide ≈ the app's 200 ms). Held-out match at 200 ms:
+ * top-3 agreement 50.3% → 57.7%. Notable: no I-dependency penalty (strong players
+ * keep and use quad wells), minis worth ¼ of a full spin, overhangs penalised harder.
+ */
 export const PLAN_SCORE: PlanScoreConfig = {
-  attack: 2,
-  chainLink: 6,
-  chainMiniFactor: 0.5,
-  chainBonus: 3,
-  fullSpin: 4,
-  piecesUsed: 1.5,
+  attack: 0.8,
+  chainLink: 7.7,
+  chainMiniFactor: 0.25,
+  chainBonus: 0,
+  fullSpin: 16.4,
+  piecesUsed: 2.4,
+  holdUsed: 0,
   b2bBreak: 40,
 
-  sealed: 11,
+  sealed: 17.6,
   unsafeDig: 5,
-  overhang: 3,
-  bumpiness: 0.35,
-  bumpSquared: 0.08,
+  overhang: 4.8,
+  bumpiness: 0.09,
+  bumpSquared: 0.04,
 
-  noCleanSpot: 2.5,
-  iWell: 3,
+  noCleanSpot: 2,
+  iWell: 0,
   iWellDepth: 2,
-  iRow: 3,
+  iRow: 0,
   iOnly: 8,
 
-  slotKnown: 3,
+  slotKnown: 1.5,
   slotUnseen: 1,
   slotMiniFactor: 0.5,
 
   tKept: 3,
   tLookahead: 3,
-  tWasted: 5,
+  tWasted: 2.5,
 
   safetyMargin: 12,
-  danger: 4,
+  danger: 2,
   heightLimit: 18,
 }
 

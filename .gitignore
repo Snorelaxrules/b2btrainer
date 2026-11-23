@@ -2,3 +2,7 @@ node_modules
 dist
 *.tsbuildinfo
 .DS_Store
+
+# downloaded TETR.IO replays (local analysis only)
+replays/*
+!replays/.gitkeep
